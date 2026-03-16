@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "302263399509",
+    "project_id": "asadhamid-org",
+    "storage_bucket": "asadhamid-org.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:302263399509:android:85681317f70cfe4e3e10dc",
+        "android_client_info": {
+          "package_name": "com.example.mughal_group_branch_two"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD7z517dAto8zHOHXqn0V2PHrewCt77s-E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

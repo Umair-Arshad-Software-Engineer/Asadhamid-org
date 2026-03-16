@@ -1,0 +1,33 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "asadhamid-org",
+          "appId": "1:302263399509:android:85681317f70cfe4e3e10dc",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "asadhamid-org",
+          "configurations": {
+            "android": "1:302263399509:android:85681317f70cfe4e3e10dc",
+            "ios": "1:302263399509:ios:f4c37c8928aead5a3e10dc",
+            "macos": "1:302263399509:ios:f4c37c8928aead5a3e10dc",
+            "web": "1:302263399509:web:6a2759082284cec43e10dc",
+            "windows": "1:302263399509:web:2ba30b530bc8d35f3e10dc"
+          }
+        }
+      }
+    }
+  },
+  "hosting": {
+    "public": "build/web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ]
+  }
+}
