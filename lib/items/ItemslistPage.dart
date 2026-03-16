@@ -43,6 +43,25 @@ class _ItemsListPageState extends State<ItemsListPage> {
   final Color _textColor = Colors.grey[800]!;
   Map<String, double> _expandedCombinations = {};
 
+  // ── Stock helpers ──────────────────────────────────────────────────────────
+  Color _stockColor(double qty, double threshold) {
+    if (qty <= 0) return Colors.red;
+    if (qty <= threshold) return Colors.orange;
+    return Colors.green;
+  }
+
+  IconData _stockIcon(double qty, double threshold) {
+    if (qty <= 0) return Icons.remove_circle;
+    if (qty <= threshold) return Icons.warning_amber_rounded;
+    return Icons.check_circle;
+  }
+
+  String _stockLabel(double qty, double threshold) {
+    if (qty <= 0) return 'Out of Stock';
+    if (qty <= threshold) return 'Low Stock';
+    return 'In Stock';
+  }
+
   Future<void> _fetchCustomerNames() async {
     final snapshot = await FirebaseDatabase.instance.ref('customers').get();
     if (snapshot.exists) {
@@ -207,13 +226,16 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 combosText = combos.map((combo) {
                   if (combo is Map) {
                     final map = Map<String, dynamic>.from(combo);
+                    final stockQty =
+                        (map['stockQuantity'] as num?)?.toDouble() ?? 0.0;
+                    final stockUnit = map['stockUnit']?.toString() ?? 'kg';
                     String comboStr =
                         "Length: ${map['length'] ?? ''} (${map['lengthDecimal'] ?? ''})\n"
                         "Body: ${map['bodyType'] ?? ''}\n"
                         "Cost: ${map['costPricePerKg']?.toStringAsFixed(2) ?? '0.00'} | "
-                        "Sale: ${map['salePricePerKg']?.toStringAsFixed(2) ?? '0.00'}";
+                        "Sale: ${map['salePricePerKg']?.toStringAsFixed(2) ?? '0.00'}\n"
+                        "Stock: ${stockQty.toStringAsFixed(2)} $stockUnit";
 
-                    // Add per-combination customer prices to PDF
                     if (map['customerPrices'] != null &&
                         (map['customerPrices'] as Map).isNotEmpty) {
                       final prices = map['customerPrices'] as Map;
@@ -230,10 +252,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 }).where((str) => str.isNotEmpty).join("\n\n");
               }
 
-              double avgCost =
-                  item['avgCostPricePerKg']?.toDouble() ?? 0.0;
-              double avgSale =
-                  item['avgSalePricePerKg']?.toDouble() ?? 0.0;
+              double avgCost = item['avgCostPricePerKg']?.toDouble() ?? 0.0;
+              double avgSale = item['avgSalePricePerKg']?.toDouble() ?? 0.0;
               double profitMargin = avgSale - avgCost;
               double profitPercentage =
               avgCost > 0 ? (profitMargin / avgCost) * 100 : 0.0;
@@ -282,16 +302,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
             .showSnackBar(SnackBar(content: Text("Generate PDF first")));
         return;
       }
-      await Printing.sharePdf(
-          bytes: _pdfBytes!, filename: 'items_list.pdf');
+      await Printing.sharePdf(bytes: _pdfBytes!, filename: 'items_list.pdf');
     } else {
       if (_savedPdfPath == null) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text("Generate PDF first")));
         return;
       }
-      await Share.shareXFiles([XFile(_savedPdfPath!)],
-          text: 'Items List PDF');
+      await Share.shareXFiles([XFile(_savedPdfPath!)], text: 'Items List PDF');
     }
   }
 
@@ -362,8 +380,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
     try {
       final purchaseSnapshot = await database.child('purchases').get();
       if (purchaseSnapshot.exists) {
-        final purchases =
-        purchaseSnapshot.value as Map<dynamic, dynamic>;
+        final purchases = purchaseSnapshot.value as Map<dynamic, dynamic>;
         purchases.forEach((purchaseKey, purchaseData) {
           if (purchaseData['items'] != null) {
             final items = purchaseData['items'] as List;
@@ -375,10 +392,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
                   'date': purchaseData['timestamp'],
                   'quantity': item['quantity'],
                   'price': item['purchasePrice'],
-                  'vendor':
-                  purchaseData['vendorName'] ?? 'Unknown Vendor',
-                  'total':
-                  (item['quantity'] as num).toDouble() *
+                  'vendor': purchaseData['vendorName'] ?? 'Unknown Vendor',
+                  'total': (item['quantity'] as num).toDouble() *
                       (item['purchasePrice'] as num).toDouble(),
                 });
               }
@@ -407,15 +422,97 @@ class _ItemsListPageState extends State<ItemsListPage> {
           Text(title, style: TextStyle(fontSize: 12, color: Colors.grey[700])),
           SizedBox(height: 4),
           Text("PKR $value",
-              style:
-              TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
         ],
       ),
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Combination list in detail panel
+  // LEFT PANEL: small stock chip shown on each item tile
+  // ─────────────────────────────────────────────────────────────────────────
+  Widget _buildItemStockChips(Map<String, dynamic> item) {
+    final combos = item['lengthBodyCombinations'];
+    if (combos == null || combos is! List || combos.isEmpty) return SizedBox();
+
+    int outOfStock = 0;
+    int lowStock = 0;
+    double totalStock = 0;
+
+    for (final c in combos) {
+      if (c is Map) {
+        final qty = (c['stockQuantity'] as num?)?.toDouble() ?? 0.0;
+        final threshold = (c['lowStockThreshold'] as num?)?.toDouble() ?? 10.0;
+        totalStock += qty;
+        if (qty <= 0)
+          outOfStock++;
+        else if (qty <= threshold) lowStock++;
+      }
+    }
+
+    Color chipColor = Colors.green;
+    String chipLabel = '${totalStock.toStringAsFixed(1)} kg';
+    if (outOfStock > 0) chipColor = Colors.red;
+    else if (lowStock > 0) chipColor = Colors.orange;
+
+    return Row(
+      children: [
+        Container(
+          padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: chipColor.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: chipColor.withOpacity(0.4)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.inventory_2, size: 10, color: chipColor),
+              SizedBox(width: 3),
+              Text(
+                chipLabel,
+                style: TextStyle(
+                    fontSize: 10,
+                    color: chipColor,
+                    fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+        ),
+        if (outOfStock > 0) ...[
+          SizedBox(width: 4),
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.red[50],
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              '$outOfStock out',
+              style: TextStyle(fontSize: 9, color: Colors.red[700]),
+            ),
+          ),
+        ],
+        if (lowStock > 0) ...[
+          SizedBox(width: 4),
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.orange[50],
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              '$lowStock low',
+              style: TextStyle(fontSize: 9, color: Colors.orange[700]),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CENTER PANEL: combination list with stock
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildLengthBodyCombinations() {
     if (_selectedItem == null ||
@@ -445,11 +542,15 @@ class _ItemsListPageState extends State<ItemsListPage> {
                       color: _primaryColor),
                 ),
                 Text("Tap to expand details",
-                    style:
-                    TextStyle(fontSize: 12, color: Colors.grey)),
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
               ],
             ),
             SizedBox(height: 8),
+
+            // ── Stock overview bar ───────────────────────────────────────
+            _buildCombinationsStockOverview(combos),
+            SizedBox(height: 8),
+
             ...combos.asMap().entries.map((entry) {
               final index = entry.key;
               final combo = entry.value;
@@ -458,15 +559,21 @@ class _ItemsListPageState extends State<ItemsListPage> {
               final map = Map<String, dynamic>.from(combo);
               final itemKey = _selectedItem!['key'];
               final comboKey = '${itemKey}_$index';
-              final isExpanded =
-                  _expandedCombinations[comboKey] == 1.0;
+              final isExpanded = _expandedCombinations[comboKey] == 1.0;
 
-              // Count custom customer prices for this combo
               final customerPricesMap = map['customerPrices'];
               final int customerPriceCount =
-              (customerPricesMap is Map)
-                  ? customerPricesMap.length
-                  : 0;
+              (customerPricesMap is Map) ? customerPricesMap.length : 0;
+
+              // Stock values
+              final stockQty =
+                  (map['stockQuantity'] as num?)?.toDouble() ?? 0.0;
+              final lowThreshold =
+                  (map['lowStockThreshold'] as num?)?.toDouble() ?? 10.0;
+              final stockUnit = map['stockUnit']?.toString() ?? 'kg';
+              final sColor = _stockColor(stockQty, lowThreshold);
+              final sIcon = _stockIcon(stockQty, lowThreshold);
+              final sLabel = _stockLabel(stockQty, lowThreshold);
 
               return Card(
                 margin: EdgeInsets.symmetric(vertical: 4),
@@ -474,15 +581,13 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 child: Column(
                   children: [
                     ListTile(
-                      contentPadding: EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
+                      contentPadding:
+                      EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       leading: Container(
                         padding: EdgeInsets.all(8),
                         decoration: BoxDecoration(
-                          color:
-                          _primaryColor.withOpacity(0.1),
-                          borderRadius:
-                          BorderRadius.circular(8),
+                          color: _primaryColor.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(
                           "${index + 1}",
@@ -496,68 +601,99 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           Expanded(
                             child: Text(
                               "Length: ${map['length'] ?? ''}",
-                              style: TextStyle(
-                                  fontWeight: FontWeight.bold),
+                              style: TextStyle(fontWeight: FontWeight.bold),
                             ),
                           ),
                           SizedBox(width: 10),
                           Expanded(
                             child: Text(
                               "Body: ${map['bodyType'] ?? ''}",
-                              style: TextStyle(
-                                  fontWeight: FontWeight.bold),
+                              style: TextStyle(fontWeight: FontWeight.bold),
                             ),
                           ),
                         ],
                       ),
                       subtitle: Column(
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           if (map['lengthDecimal'] != null &&
-                              map['lengthDecimal']
-                                  .toString()
-                                  .isNotEmpty)
+                              map['lengthDecimal'].toString().isNotEmpty)
                             Text(
                                 "Length (Decimal): ${map['lengthDecimal']}"),
-                          // Purple badge for custom customer prices
+
+                          // ── Stock badge ──────────────────────────────
+                          Padding(
+                            padding: const EdgeInsets.only(top: 5),
+                            child: Row(
+                              children: [
+                                Icon(sIcon, size: 14, color: sColor),
+                                SizedBox(width: 4),
+                                Text(
+                                  '${stockQty.toStringAsFixed(2)} $stockUnit',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: sColor,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                SizedBox(width: 6),
+                                Container(
+                                  padding: EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: sColor.withOpacity(0.12),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    sLabel,
+                                    style: TextStyle(
+                                        fontSize: 10,
+                                        color: sColor,
+                                        fontWeight: FontWeight.w600),
+                                  ),
+                                ),
+                                SizedBox(width: 6),
+                                Text(
+                                  '(alert ≤ ${lowThreshold.toStringAsFixed(0)} $stockUnit)',
+                                  style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.grey[500]),
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          // Customer price badge
                           if (customerPriceCount > 0)
                             Padding(
-                              padding:
-                              const EdgeInsets.only(top: 4),
+                              padding: const EdgeInsets.only(top: 4),
                               child: Row(
                                 children: [
                                   Icon(Icons.people,
-                                      size: 13,
-                                      color: Colors.purple),
+                                      size: 13, color: Colors.purple),
                                   SizedBox(width: 4),
                                   Text(
                                     "$customerPriceCount custom price(s)",
                                     style: TextStyle(
-                                        fontSize: 11,
-                                        color: Colors.purple),
+                                        fontSize: 11, color: Colors.purple),
                                   ),
                                 ],
                               ),
                             ),
-                          if (isExpanded)
-                            _buildComboDetails(map),
+
+                          if (isExpanded) _buildComboDetails(map),
                         ],
                       ),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          // Dedicated button to view customer prices
                           if (customerPriceCount > 0)
                             IconButton(
                               icon: Icon(Icons.people,
                                   color: Colors.purple, size: 20),
                               tooltip: 'View customer prices',
                               onPressed: () =>
-                                  _showCombinationCustomerPrices(
-                                    map,
-                                    index,
-                                  ),
+                                  _showCombinationCustomerPrices(map, index),
                             ),
                           Icon(
                             isExpanded
@@ -567,8 +703,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           ),
                         ],
                       ),
-                      onTap: () => _toggleCombinationExpansion(
-                          itemKey, index),
+                      onTap: () =>
+                          _toggleCombinationExpansion(itemKey, index),
                     ),
                   ],
                 ),
@@ -580,8 +716,76 @@ class _ItemsListPageState extends State<ItemsListPage> {
     );
   }
 
+  // ── Horizontal stock overview bar (all combos at a glance) ──────────────
+  Widget _buildCombinationsStockOverview(List combos) {
+    double totalStock = 0;
+    int outOfStock = 0;
+    int lowStock = 0;
+    int inStock = 0;
+
+    for (final c in combos) {
+      if (c is Map) {
+        final qty = (c['stockQuantity'] as num?)?.toDouble() ?? 0.0;
+        final threshold = (c['lowStockThreshold'] as num?)?.toDouble() ?? 10.0;
+        totalStock += qty;
+        if (qty <= 0)
+          outOfStock++;
+        else if (qty <= threshold)
+          lowStock++;
+        else
+          inStock++;
+      }
+    }
+
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[200]!),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.inventory_2, size: 16, color: _primaryColor),
+          SizedBox(width: 8),
+          Text(
+            'Total Stock: ${totalStock.toStringAsFixed(2)} kg',
+            style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: _primaryColor,
+                fontSize: 13),
+          ),
+          Spacer(),
+          if (inStock > 0) _buildOverviewChip('$inStock OK', Colors.green),
+          if (lowStock > 0) ...[
+            SizedBox(width: 4),
+            _buildOverviewChip('$lowStock Low', Colors.orange),
+          ],
+          if (outOfStock > 0) ...[
+            SizedBox(width: 4),
+            _buildOverviewChip('$outOfStock Out', Colors.red),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOverviewChip(String label, Color color) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Text(label,
+          style: TextStyle(
+              fontSize: 11, color: color, fontWeight: FontWeight.bold)),
+    );
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
-  // Expanded combo details — now includes customer prices section
+  // Expanded combo details — stock section at top + prices + customer prices
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildComboDetails(Map<String, dynamic> combo) {
     final costPrice = combo['costPricePerKg']?.toDouble() ?? 0.0;
@@ -590,7 +794,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
     final profitPercentage =
     costPrice > 0 ? (profitMargin / costPrice) * 100 : 0.0;
 
-    // Parse customer prices for this combination
+    final stockQty = (combo['stockQuantity'] as num?)?.toDouble() ?? 0.0;
+    final lowThreshold =
+        (combo['lowStockThreshold'] as num?)?.toDouble() ?? 10.0;
+    final stockUnit = combo['stockUnit']?.toString() ?? 'kg';
+    final sColor = _stockColor(stockQty, lowThreshold);
+    final sIcon = _stockIcon(stockQty, lowThreshold);
+    final sLabel = _stockLabel(stockQty, lowThreshold);
+
     final rawCustomerPrices = combo['customerPrices'];
     final Map<String, dynamic> customerPrices = {};
     if (rawCustomerPrices is Map) {
@@ -610,11 +821,58 @@ class _ItemsListPageState extends State<ItemsListPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Price Details ──
+          // ── Stock Status ──────────────────────────────────────────────
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: sColor.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: sColor.withOpacity(0.3)),
+            ),
+            child: Row(
+              children: [
+                Icon(sIcon, size: 18, color: sColor),
+                SizedBox(width: 8),
+                Text(
+                  'Stock: ${stockQty.toStringAsFixed(2)} $stockUnit',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: sColor,
+                    fontSize: 13,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Container(
+                  padding:
+                  EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: sColor.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    sLabel,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: sColor,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Spacer(),
+                Text(
+                  'Alert ≤ ${lowThreshold.toStringAsFixed(0)} $stockUnit',
+                  style:
+                  TextStyle(fontSize: 10, color: Colors.grey[600]),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(height: 12),
+
+          // ── Price Details ─────────────────────────────────────────────
           Text(
             "Price Details",
-            style: TextStyle(
-                fontWeight: FontWeight.bold, color: _primaryColor),
+            style:
+            TextStyle(fontWeight: FontWeight.bold, color: _primaryColor),
           ),
           SizedBox(height: 8),
           Row(
@@ -640,9 +898,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
           Container(
             padding: EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: profitMargin >= 0
-                  ? Colors.green[50]
-                  : Colors.red[50],
+              color: profitMargin >= 0 ? Colors.green[50] : Colors.red[50],
               borderRadius: BorderRadius.circular(6),
               border: Border.all(
                 color: profitMargin >= 0
@@ -689,7 +945,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
             ),
           ),
 
-          // ── Customer-Specific Prices ──
+          // ── Customer-Specific Prices ──────────────────────────────────
           if (customerPrices.isNotEmpty) ...[
             SizedBox(height: 12),
             Row(
@@ -699,9 +955,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 Text(
                   "Customer-Specific Prices",
                   style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.purple,
-                  ),
+                      fontWeight: FontWeight.bold, color: Colors.purple),
                 ),
               ],
             ),
@@ -721,8 +975,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           'Customer ($customerId)';
                   final discount = salePrice > 0
                       ? salePrice -
-                      (double.tryParse(price.toString()) ??
-                          salePrice)
+                      (double.tryParse(price.toString()) ?? salePrice)
                       : 0.0;
 
                   return Padding(
@@ -734,15 +987,12 @@ class _ItemsListPageState extends State<ItemsListPage> {
                             size: 16, color: Colors.purple[300]),
                         SizedBox(width: 8),
                         Expanded(
-                          child: Text(
-                            customerName,
-                            style: TextStyle(
-                                fontWeight: FontWeight.w500),
-                          ),
+                          child: Text(customerName,
+                              style:
+                              TextStyle(fontWeight: FontWeight.w500)),
                         ),
                         Column(
-                          crossAxisAlignment:
-                          CrossAxisAlignment.end,
+                          crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
                             Text(
                               "PKR $price /kg",
@@ -775,13 +1025,11 @@ class _ItemsListPageState extends State<ItemsListPage> {
             SizedBox(height: 8),
             Row(
               children: [
-                Icon(Icons.people_outline,
-                    size: 14, color: Colors.grey),
+                Icon(Icons.people_outline, size: 14, color: Colors.grey),
                 SizedBox(width: 4),
                 Text(
                   "No customer-specific prices set",
-                  style:
-                  TextStyle(fontSize: 12, color: Colors.grey),
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
                 ),
               ],
             ),
@@ -822,8 +1070,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
             ),
             Text(
               "${combo['length'] ?? ''} — ${combo['bodyType'] ?? ''}",
-              style:
-              TextStyle(fontSize: 13, color: Colors.grey[600]),
+              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
             ),
           ],
         ),
@@ -832,7 +1079,6 @@ class _ItemsListPageState extends State<ItemsListPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Default price banner
               Container(
                 padding: EdgeInsets.all(10),
                 decoration: BoxDecoration(
@@ -861,8 +1107,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 padding: const EdgeInsets.all(16),
                 child: Text(
                   "No customer-specific prices set for this combination.",
-                  style:
-                  TextStyle(color: Colors.grey[600]),
+                  style: TextStyle(color: Colors.grey[600]),
                   textAlign: TextAlign.center,
                 ),
               )
@@ -871,19 +1116,16 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 child: ListView.separated(
                   shrinkWrap: true,
                   itemCount: customerPrices.length,
-                  separatorBuilder: (_, __) =>
-                      Divider(height: 1),
+                  separatorBuilder: (_, __) => Divider(height: 1),
                   itemBuilder: (context, i) {
                     final customerId =
                     customerPrices.keys.elementAt(i);
-                    final price =
-                    customerPrices[customerId];
+                    final price = customerPrices[customerId];
                     final customerName =
                         customerIdNameMap[customerId] ??
                             'Customer ($customerId)';
                     final parsedPrice =
-                        double.tryParse(price.toString()) ??
-                            salePrice;
+                        double.tryParse(price.toString()) ?? salePrice;
                     final diff = salePrice - parsedPrice;
 
                     return ListTile(
@@ -895,24 +1137,19 @@ class _ItemsListPageState extends State<ItemsListPage> {
                         child: Icon(Icons.person,
                             color: Colors.purple, size: 20),
                       ),
-                      title: Text(
-                        customerName,
-                        style: TextStyle(
-                            fontWeight: FontWeight.bold),
-                      ),
+                      title: Text(customerName,
+                          style:
+                          TextStyle(fontWeight: FontWeight.bold)),
                       trailing: Column(
-                        mainAxisAlignment:
-                        MainAxisAlignment.center,
-                        crossAxisAlignment:
-                        CrossAxisAlignment.end,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
                           Container(
                             padding: EdgeInsets.symmetric(
                                 horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
                               color: Colors.purple[50],
-                              borderRadius:
-                              BorderRadius.circular(6),
+                              borderRadius: BorderRadius.circular(6),
                             ),
                             child: Text(
                               "PKR $price /kg",
@@ -954,8 +1191,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
     );
   }
 
-  Widget _buildMiniPriceCard(
-      String title, String value, Color color) {
+  Widget _buildMiniPriceCard(String title, String value, Color color) {
     return Container(
       padding: EdgeInsets.all(6),
       decoration: BoxDecoration(
@@ -966,25 +1202,23 @@ class _ItemsListPageState extends State<ItemsListPage> {
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Text(title,
-              style: TextStyle(
-                  fontSize: 10, color: Colors.grey[700])),
+              style: TextStyle(fontSize: 10, color: Colors.grey[700])),
           SizedBox(height: 2),
           Text("PKR $value",
-              style: TextStyle(
-                  fontWeight: FontWeight.bold, fontSize: 12)),
+              style:
+              TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
         ],
       ),
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // _showCustomerRates — now shows per-combination breakdown
+  // _showCustomerRates — per-combination breakdown
   // ─────────────────────────────────────────────────────────────────────────
   void _showCustomerRates(Map<String, dynamic> item) {
     final languageProvider =
     Provider.of<LanguageProvider>(context, listen: false);
 
-    // Collect all combination-level customer prices
     final combos = item['lengthBodyCombinations'];
     final List<Map<String, dynamic>> comboList = [];
     if (combos is List) {
@@ -1033,12 +1267,10 @@ class _ItemsListPageState extends State<ItemsListPage> {
             itemBuilder: (context, ci) {
               final combo = comboList[ci];
               final salePrice =
-                  combo['salePricePerKg']?.toDouble() ??
-                      0.0;
+                  combo['salePricePerKg']?.toDouble() ?? 0.0;
               final rawPrices = combo['customerPrices'] as Map;
               final Map<String, dynamic> prices = {};
-              rawPrices.forEach(
-                      (k, v) => prices[k.toString()] = v);
+              rawPrices.forEach((k, v) => prices[k.toString()] = v);
 
               return Card(
                 margin: EdgeInsets.symmetric(vertical: 6),
@@ -1048,20 +1280,16 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 child: Padding(
                   padding: EdgeInsets.all(10),
                   child: Column(
-                    crossAxisAlignment:
-                    CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Combination header
                       Row(
                         children: [
                           Container(
                             padding: EdgeInsets.symmetric(
                                 horizontal: 8, vertical: 4),
                             decoration: BoxDecoration(
-                              color: _primaryColor
-                                  .withOpacity(0.1),
-                              borderRadius:
-                              BorderRadius.circular(6),
+                              color: _primaryColor.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(6),
                             ),
                             child: Text(
                               "${combo['length'] ?? ''} — ${combo['bodyType'] ?? ''}",
@@ -1075,15 +1303,13 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           Text(
                             "Default: ${salePrice.toStringAsFixed(2)} PKR/kg",
                             style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.blue[700],
-                            ),
+                                fontSize: 12,
+                                color: Colors.blue[700]),
                           ),
                         ],
                       ),
                       SizedBox(height: 8),
                       Divider(height: 1),
-                      // Customer prices for this combo
                       ...prices.entries.map((entry) {
                         final customerId = entry.key;
                         final price = entry.value;
@@ -1091,11 +1317,9 @@ class _ItemsListPageState extends State<ItemsListPage> {
                             customerIdNameMap[customerId] ??
                                 'Customer ($customerId)';
                         final parsedPrice =
-                            double.tryParse(
-                                price.toString()) ??
+                            double.tryParse(price.toString()) ??
                                 salePrice;
-                        final diff =
-                            salePrice - parsedPrice;
+                        final diff = salePrice - parsedPrice;
 
                         return Padding(
                           padding: const EdgeInsets.symmetric(
@@ -1105,20 +1329,15 @@ class _ItemsListPageState extends State<ItemsListPage> {
                               CircleAvatar(
                                 radius: 14,
                                 backgroundColor:
-                                Colors.purple
-                                    .withOpacity(0.1),
+                                Colors.purple.withOpacity(0.1),
                                 child: Icon(Icons.person,
-                                    color: Colors.purple,
-                                    size: 16),
+                                    color: Colors.purple, size: 16),
                               ),
                               SizedBox(width: 8),
                               Expanded(
-                                child: Text(
-                                  customerName,
-                                  style: TextStyle(
-                                      fontWeight:
-                                      FontWeight.w500),
-                                ),
+                                child: Text(customerName,
+                                    style: TextStyle(
+                                        fontWeight: FontWeight.w500)),
                               ),
                               Column(
                                 crossAxisAlignment:
@@ -1126,22 +1345,17 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                 children: [
                                   Container(
                                     padding: EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 3),
+                                        horizontal: 8, vertical: 3),
                                     decoration: BoxDecoration(
-                                      color:
-                                      Colors.purple[50],
+                                      color: Colors.purple[50],
                                       borderRadius:
-                                      BorderRadius.circular(
-                                          5),
+                                      BorderRadius.circular(5),
                                     ),
                                     child: Text(
                                       "PKR $price /kg",
                                       style: TextStyle(
-                                        fontWeight:
-                                        FontWeight.bold,
-                                        color:
-                                        Colors.purple[700],
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.purple[700],
                                       ),
                                     ),
                                   ),
@@ -1153,10 +1367,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                       style: TextStyle(
                                         fontSize: 10,
                                         color: diff > 0
-                                            ? Colors
-                                            .orange[600]
-                                            : Colors
-                                            .green[600],
+                                            ? Colors.orange[600]
+                                            : Colors.green[600],
                                       ),
                                     ),
                                 ],
@@ -1175,9 +1387,130 @@ class _ItemsListPageState extends State<ItemsListPage> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text(languageProvider.isEnglish
-                ? "Close"
-                : "بند کریں"),
+            child: Text(languageProvider.isEnglish ? "Close" : "بند کریں"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // RIGHT PANEL: stock summary card
+  // ─────────────────────────────────────────────────────────────────────────
+  Widget _buildStockSummaryCard() {
+    if (_selectedItem == null ||
+        _selectedItem!['lengthBodyCombinations'] == null) {
+      return SizedBox();
+    }
+
+    final combos = _selectedItem!['lengthBodyCombinations'] as List;
+    double totalStock = 0;
+    int outOfStock = 0;
+    int lowStock = 0;
+    int inStock = 0;
+
+    for (final c in combos) {
+      if (c is Map) {
+        final qty = (c['stockQuantity'] as num?)?.toDouble() ?? 0.0;
+        final threshold = (c['lowStockThreshold'] as num?)?.toDouble() ?? 10.0;
+        totalStock += qty;
+        if (qty <= 0)
+          outOfStock++;
+        else if (qty <= threshold)
+          lowStock++;
+        else
+          inStock++;
+      }
+    }
+
+    Color overallColor = Colors.green;
+    if (outOfStock > 0) overallColor = Colors.red;
+    else if (lowStock > 0) overallColor = Colors.orange;
+
+    return Card(
+      margin: EdgeInsets.symmetric(horizontal: 8),
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      child: Padding(
+        padding: EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: overallColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child:
+                  Icon(Icons.inventory_2, size: 16, color: overallColor),
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'Stock Summary',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: _primaryColor,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 10),
+            Text(
+              '${totalStock.toStringAsFixed(2)} kg',
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                  color: overallColor),
+            ),
+            Text(
+              'across ${combos.length} combination(s)',
+              style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+            ),
+            SizedBox(height: 8),
+            // Mini breakdown bars
+            if (inStock > 0)
+              _buildStockBreakdownRow('In Stock', inStock, Colors.green),
+            if (lowStock > 0)
+              _buildStockBreakdownRow('Low Stock', lowStock, Colors.orange),
+            if (outOfStock > 0)
+              _buildStockBreakdownRow('Out of Stock', outOfStock, Colors.red),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStockBreakdownRow(String label, int count, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+                color: color, shape: BoxShape.circle),
+          ),
+          SizedBox(width: 6),
+          Text(label, style: TextStyle(fontSize: 11, color: Colors.grey[700])),
+          Spacer(),
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              '$count combo${count > 1 ? 's' : ''}',
+              style: TextStyle(
+                  fontSize: 10,
+                  color: color,
+                  fontWeight: FontWeight.bold),
+            ),
           ),
         ],
       ),
@@ -1200,8 +1533,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(
-                    builder: (context) => StockReportPage()),
+                MaterialPageRoute(builder: (context) => StockReportPage()),
               );
             },
             icon: Icon(Icons.history, color: Colors.white),
@@ -1230,7 +1562,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
         ),
         child: Row(
           children: [
-            /// Left Panel - Item List
+            // ── LEFT PANEL ─────────────────────────────────────────────────
             Expanded(
               flex: 2,
               child: Card(
@@ -1249,8 +1581,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           labelText: 'Search Item',
                           prefixIcon: Icon(Icons.search),
                           border: OutlineInputBorder(
-                            borderRadius:
-                            BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(8),
                           ),
                           filled: true,
                           fillColor: _cardColor,
@@ -1263,21 +1594,48 @@ class _ItemsListPageState extends State<ItemsListPage> {
                         itemBuilder: (context, index) {
                           final item = _filteredItems[index];
                           final combosCount =
-                          item['lengthBodyCombinations'] !=
-                              null
-                              ? (item[
-                          'lengthBodyCombinations']
-                          as List)
+                          item['lengthBodyCombinations'] != null
+                              ? (item['lengthBodyCombinations'] as List)
                               .length
                               : 0;
+
+                          // Compute stock alert colour for left border
+                          Color borderColor = Colors.grey[200]!;
+                          if (item['lengthBodyCombinations'] != null &&
+                              item['lengthBodyCombinations'] is List) {
+                            final cs =
+                            item['lengthBodyCombinations'] as List;
+                            bool hasOut = false, hasLow = false;
+                            for (final c in cs) {
+                              if (c is Map) {
+                                final q =
+                                    (c['stockQuantity'] as num?)
+                                        ?.toDouble() ??
+                                        0.0;
+                                final t =
+                                    (c['lowStockThreshold'] as num?)
+                                        ?.toDouble() ??
+                                        10.0;
+                                if (q <= 0) hasOut = true;
+                                else if (q <= t) hasLow = true;
+                              }
+                            }
+                            if (hasOut)
+                              borderColor = Colors.red[300]!;
+                            else if (hasLow)
+                              borderColor = Colors.orange[300]!;
+                            else if (cs.isNotEmpty)
+                              borderColor = Colors.green[300]!;
+                          }
 
                           return Card(
                             margin: EdgeInsets.symmetric(
                                 horizontal: 8, vertical: 4),
                             elevation: 2,
                             shape: RoundedRectangleBorder(
-                              borderRadius:
-                              BorderRadius.circular(8),
+                              borderRadius: BorderRadius.circular(8),
+                              side: BorderSide(
+                                  color: borderColor, width: 1.5),
                             ),
                             child: ListTile(
                               leading: Container(
@@ -1307,8 +1665,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                               title: Text(item['itemName'],
                                   style: TextStyle(
                                       color: _textColor,
-                                      fontWeight:
-                                      FontWeight.bold)),
+                                      fontWeight: FontWeight.bold)),
                               subtitle: Column(
                                 crossAxisAlignment:
                                 CrossAxisAlignment.start,
@@ -1316,17 +1673,11 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                   Text(
                                     "Qty: ${item['qtyOnHand'] ?? 0}",
                                     style: TextStyle(
-                                        color: _textColor
-                                            .withOpacity(0.7)),
+                                        color: _textColor.withOpacity(0.7)),
                                   ),
-                                  if (combosCount > 0)
-                                    Text(
-                                      "$combosCount combo${combosCount > 1 ? 's' : ''}",
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        color: Colors.blue[600],
-                                      ),
-                                    ),
+                                  SizedBox(height: 4),
+                                  // ── Stock chips ──────────────────────
+                                  _buildItemStockChips(item),
                                 ],
                               ),
                               trailing: Row(
@@ -1335,43 +1686,36 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                   IconButton(
                                     icon: Icon(Icons.edit_note,
                                         color: Colors.blue),
-                                    onPressed: () =>
-                                        Navigator.push(
-                                          context,
-                                          MaterialPageRoute(
-                                            builder: (context) =>
-                                                EditQtyPage(
-                                                    itemData: item),
-                                          ),
-                                        ),
+                                    onPressed: () => Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (context) =>
+                                            EditQtyPage(itemData: item),
+                                      ),
+                                    ),
                                   ),
                                   IconButton(
                                     icon: Icon(Icons.delete,
                                         color: Colors.red),
                                     onPressed: () =>
-                                        _confirmDelete(
-                                            item['key']),
+                                        _confirmDelete(item['key']),
                                   ),
                                 ],
                               ),
                               onTap: () async {
                                 setState(() {
                                   _selectedItem = item;
-                                  _isLoadingTransactions =
-                                  true;
+                                  _isLoadingTransactions = true;
                                 });
                                 final transactions =
                                 await _fetchItemTransactions(
                                     item['key']);
                                 setState(() {
-                                  _itemTransactions =
-                                      transactions
-                                          .where((t) =>
-                                      t['type'] ==
-                                          'Purchase')
-                                          .toList();
-                                  _isLoadingTransactions =
-                                  false;
+                                  _itemTransactions = transactions
+                                      .where(
+                                          (t) => t['type'] == 'Purchase')
+                                      .toList();
+                                  _isLoadingTransactions = false;
                                 });
                               },
                             ),
@@ -1384,7 +1728,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
               ),
             ),
 
-            /// Center Panel - Item Detail
+            // ── CENTER PANEL ───────────────────────────────────────────────
             Expanded(
               flex: 3,
               child: _selectedItem == null
@@ -1402,22 +1746,19 @@ class _ItemsListPageState extends State<ItemsListPage> {
                         Icon(
                           Icons.inventory,
                           size: 60,
-                          color:
-                          _primaryColor.withOpacity(0.5),
+                          color: _primaryColor.withOpacity(0.5),
                         ),
                         SizedBox(height: 16),
                         Text(
                           "Select an item to view details",
                           style: TextStyle(
-                              color: _textColor,
-                              fontSize: 16),
+                              color: _textColor, fontSize: 16),
                         ),
                         SizedBox(height: 8),
                         Text(
                           "Click on any item from the left panel",
                           style: TextStyle(
-                              color: _textColor
-                                  .withOpacity(0.6),
+                              color: _textColor.withOpacity(0.6),
                               fontSize: 12),
                         ),
                       ],
@@ -1438,8 +1779,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                       return SingleChildScrollView(
                         child: ConstrainedBox(
                           constraints: BoxConstraints(
-                            minHeight:
-                            constraints.maxHeight,
+                            minHeight: constraints.maxHeight,
                           ),
                           child: IntrinsicHeight(
                             child: Column(
@@ -1448,8 +1788,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                               children: [
                                 Row(
                                   mainAxisAlignment:
-                                  MainAxisAlignment
-                                      .spaceBetween,
+                                  MainAxisAlignment.spaceBetween,
                                   children: [
                                     Text(
                                       "Item Details",
@@ -1457,11 +1796,9 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                           .textTheme
                                           .titleLarge
                                           ?.copyWith(
-                                        color:
-                                        _primaryColor,
+                                        color: _primaryColor,
                                         fontWeight:
-                                        FontWeight
-                                            .bold,
+                                        FontWeight.bold,
                                       ),
                                     ),
                                     Row(
@@ -1470,24 +1807,18 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                         'isBOM'] ==
                                             true)
                                           Padding(
-                                            padding: EdgeInsets
-                                                .only(
+                                            padding: EdgeInsets.only(
                                                 right: 8),
                                             child: Chip(
-                                              label:
-                                              Text("BOM"),
+                                              label: Text("BOM"),
                                               backgroundColor:
-                                              Colors.blue[
-                                              100],
+                                              Colors.blue[100],
                                             ),
                                           ),
-                                        // 💰 Customer rates button — now shows per-combo prices
                                         IconButton(
                                           icon: Icon(
-                                              Icons
-                                                  .attach_money,
-                                              color:
-                                              _secondaryColor),
+                                              Icons.attach_money,
+                                              color: _secondaryColor),
                                           tooltip:
                                           'View customer prices per combination',
                                           onPressed: () =>
@@ -1506,15 +1837,13 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                 // Basic Info
                                 Card(
                                   elevation: 2,
-                                  margin: EdgeInsets.only(
-                                      bottom: 16),
+                                  margin:
+                                  EdgeInsets.only(bottom: 16),
                                   child: Padding(
-                                    padding:
-                                    EdgeInsets.all(12),
+                                    padding: EdgeInsets.all(12),
                                     child: Column(
                                       crossAxisAlignment:
-                                      CrossAxisAlignment
-                                          .start,
+                                      CrossAxisAlignment.start,
                                       children: [
                                         _buildDetailRow(
                                           "Size",
@@ -1555,41 +1884,34 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                   ),
                                 ),
 
-                                // Combinations (with inline customer prices)
+                                // Combinations (with inline stock + customer prices)
                                 _buildLengthBodyCombinations(),
 
                                 SizedBox(height: 16),
                                 Expanded(
-                                  child:
-                                  SingleChildScrollView(
+                                  child: SingleChildScrollView(
                                     child: Container(
-                                      padding:
-                                      EdgeInsets.all(12),
-                                      decoration:
-                                      BoxDecoration(
-                                        color:
-                                        Colors.grey[50],
+                                      padding: EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.grey[50],
                                         borderRadius:
-                                        BorderRadius
-                                            .circular(8),
+                                        BorderRadius.circular(
+                                            8),
                                         border: Border.all(
-                                            color: Colors
-                                                .grey[200]!),
+                                            color:
+                                            Colors.grey[200]!),
                                       ),
                                       child: Column(
                                         crossAxisAlignment:
-                                        CrossAxisAlignment
-                                            .start,
+                                        CrossAxisAlignment.start,
                                         children: [
                                           Text(
                                             "Average Price Summary",
                                             style: TextStyle(
                                               fontWeight:
-                                              FontWeight
-                                                  .bold,
+                                              FontWeight.bold,
                                               fontSize: 16,
-                                              color:
-                                              _primaryColor,
+                                              color: _primaryColor,
                                             ),
                                           ),
                                           SizedBox(height: 8),
@@ -1597,36 +1919,31 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                             "Based on ${_selectedItem!['lengthBodyCombinations'] != null ? (_selectedItem!['lengthBodyCombinations'] as List).length : 0} combination(s)",
                                             style: TextStyle(
                                                 fontSize: 12,
-                                                color: Colors
-                                                    .grey[600]),
+                                                color:
+                                                Colors.grey[600]),
                                           ),
                                           SizedBox(height: 12),
                                           Row(
                                             children: [
                                               Expanded(
-                                                child:
-                                                _buildPriceCard(
+                                                child: _buildPriceCard(
                                                   "Avg Cost/Kg",
                                                   _selectedItem!['avgCostPricePerKg']
                                                       ?.toStringAsFixed(
                                                       2) ??
                                                       '0.00',
-                                                  Colors
-                                                      .blue[50]!,
+                                                  Colors.blue[50]!,
                                                 ),
                                               ),
-                                              SizedBox(
-                                                  width: 8),
+                                              SizedBox(width: 8),
                                               Expanded(
-                                                child:
-                                                _buildPriceCard(
+                                                child: _buildPriceCard(
                                                   "Avg Sale/Kg",
                                                   _selectedItem!['avgSalePricePerKg']
                                                       ?.toStringAsFixed(
                                                       2) ??
                                                       '0.00',
-                                                  Colors.green[
-                                                  50]!,
+                                                  Colors.green[50]!,
                                                 ),
                                               ),
                                             ],
@@ -1637,16 +1954,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                               null)
                                             Container(
                                               padding:
-                                              EdgeInsets
-                                                  .all(8),
+                                              EdgeInsets.all(8),
                                               decoration:
                                               BoxDecoration(
-                                                color: Colors
-                                                    .orange[50],
+                                                color:
+                                                Colors.orange[50],
                                                 borderRadius:
                                                 BorderRadius
-                                                    .circular(
-                                                    8),
+                                                    .circular(8),
                                               ),
                                               child: Column(
                                                 crossAxisAlignment:
@@ -1660,16 +1975,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                                         FontWeight
                                                             .bold,
                                                         color: Colors
-                                                            .orange[700]),
+                                                            .orange[
+                                                        700]),
                                                   ),
-                                                  SizedBox(
-                                                      height:
-                                                      8),
+                                                  SizedBox(height: 8),
                                                   Row(
                                                     children: [
                                                       Expanded(
-                                                        child:
-                                                        Column(
+                                                        child: Column(
                                                           children: [
                                                             Text(
                                                                 "1 Kg",
@@ -1679,27 +1992,20 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                                             Text(
                                                               "PKR ${_selectedItem!['profitMargin1kg']?.toStringAsFixed(2) ?? '0.00'}",
                                                               style: TextStyle(
-                                                                  fontWeight:
-                                                                  FontWeight.bold,
-                                                                  color: (_selectedItem!['profitMargin1kg'] ?? 0) >= 0
-                                                                      ? Colors.green
-                                                                      : Colors.red),
+                                                                  fontWeight: FontWeight.bold,
+                                                                  color: (_selectedItem!['profitMargin1kg'] ?? 0) >= 0 ? Colors.green : Colors.red),
                                                             ),
                                                             Text(
                                                               "${_selectedItem!['profitPercentage1kg']?.toStringAsFixed(1)}%",
                                                               style: TextStyle(
-                                                                  fontSize:
-                                                                  11,
-                                                                  color: (_selectedItem!['profitPercentage1kg'] ?? 0) >= 0
-                                                                      ? Colors.green
-                                                                      : Colors.red),
+                                                                  fontSize: 11,
+                                                                  color: (_selectedItem!['profitPercentage1kg'] ?? 0) >= 0 ? Colors.green : Colors.red),
                                                             ),
                                                           ],
                                                         ),
                                                       ),
                                                       Expanded(
-                                                        child:
-                                                        Column(
+                                                        child: Column(
                                                           children: [
                                                             Text(
                                                                 "50 Kg",
@@ -1709,20 +2015,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                                             Text(
                                                               "PKR ${_selectedItem!['profitMargin50kg']?.toStringAsFixed(2) ?? '0.00'}",
                                                               style: TextStyle(
-                                                                  fontWeight:
-                                                                  FontWeight.bold,
-                                                                  color: (_selectedItem!['profitMargin50kg'] ?? 0) >= 0
-                                                                      ? Colors.green
-                                                                      : Colors.red),
+                                                                  fontWeight: FontWeight.bold,
+                                                                  color: (_selectedItem!['profitMargin50kg'] ?? 0) >= 0 ? Colors.green : Colors.red),
                                                             ),
                                                             Text(
                                                               "${_selectedItem!['profitPercentage50kg']?.toStringAsFixed(1)}%",
                                                               style: TextStyle(
-                                                                  fontSize:
-                                                                  11,
-                                                                  color: (_selectedItem!['profitPercentage50kg'] ?? 0) >= 0
-                                                                      ? Colors.green
-                                                                      : Colors.red),
+                                                                  fontSize: 11,
+                                                                  color: (_selectedItem!['profitPercentage50kg'] ?? 0) >= 0 ? Colors.green : Colors.red),
                                                             ),
                                                           ],
                                                         ),
@@ -1739,70 +2039,56 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                 ),
 
                                 // BOM Components
-                                if (_selectedItem!['isBOM'] ==
-                                    true &&
-                                    _selectedItem![
-                                    'components'] !=
+                                if (_selectedItem!['isBOM'] == true &&
+                                    _selectedItem!['components'] !=
                                         null) ...[
                                   SizedBox(height: 16),
                                   Card(
                                     elevation: 2,
                                     child: Padding(
-                                      padding:
-                                      EdgeInsets.all(12),
+                                      padding: EdgeInsets.all(12),
                                       child: Column(
                                         crossAxisAlignment:
-                                        CrossAxisAlignment
-                                            .start,
+                                        CrossAxisAlignment.start,
                                         children: [
-                                          Text(
-                                              "BOM Components:",
+                                          Text("BOM Components:",
                                               style: TextStyle(
                                                   fontWeight:
-                                                  FontWeight
-                                                      .bold,
+                                                  FontWeight.bold,
                                                   fontSize: 16,
                                                   color:
                                                   _primaryColor)),
                                           SizedBox(height: 8),
                                           Container(
                                             height: 150,
-                                            decoration:
-                                            BoxDecoration(
+                                            decoration: BoxDecoration(
                                               border: Border.all(
                                                   color: Colors
                                                       .grey[300]!),
                                               borderRadius:
-                                              BorderRadius
-                                                  .circular(
+                                              BorderRadius.circular(
                                                   8),
                                             ),
-                                            child: ListView
-                                                .builder(
+                                            child: ListView.builder(
                                               padding:
-                                              EdgeInsets.all(
-                                                  8),
-                                              itemCount:
-                                              _selectedItem![
+                                              EdgeInsets.all(8),
+                                              itemCount: _selectedItem![
                                               'components']
                                                   .length,
                                               itemBuilder:
-                                                  (context,
-                                                  index) {
+                                                  (context, index) {
                                                 final component =
                                                 _selectedItem![
-                                                'components']
-                                                [index];
+                                                'components'][index];
                                                 return Card(
                                                   margin: EdgeInsets
                                                       .symmetric(
-                                                      vertical:
-                                                      4),
+                                                      vertical: 4),
                                                   elevation: 1,
-                                                  child:
-                                                  ListTile(
+                                                  child: ListTile(
                                                     contentPadding:
-                                                    EdgeInsets.symmetric(
+                                                    EdgeInsets
+                                                        .symmetric(
                                                         horizontal:
                                                         12),
                                                     title: Text(
@@ -1823,10 +2109,9 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                             "Total BOM Cost: PKR ${_selectedItem!['costPrice']?.toStringAsFixed(2) ?? '0.00'}",
                                             style: TextStyle(
                                                 fontWeight:
-                                                FontWeight
-                                                    .bold,
-                                                color: Colors
-                                                    .blue[700]),
+                                                FontWeight.bold,
+                                                color:
+                                                Colors.blue[700]),
                                           ),
                                         ],
                                       ),
@@ -1841,58 +2126,43 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                   MainAxisAlignment.end,
                                   children: [
                                     ElevatedButton(
-                                      style: ElevatedButton
-                                          .styleFrom(
-                                        backgroundColor:
-                                        _primaryColor,
-                                        shape:
-                                        RoundedRectangleBorder(
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: _primaryColor,
+                                        shape: RoundedRectangleBorder(
                                           borderRadius:
-                                          BorderRadius
-                                              .circular(8),
+                                          BorderRadius.circular(8),
                                         ),
                                       ),
                                       child: Row(
-                                        mainAxisSize:
-                                        MainAxisSize.min,
+                                        mainAxisSize: MainAxisSize.min,
                                         children: [
-                                          Icon(Icons.edit,
-                                              size: 16),
+                                          Icon(Icons.edit, size: 16),
                                           SizedBox(width: 4),
                                           Text("Edit Item"),
                                         ],
                                       ),
                                       onPressed: () =>
-                                          updateItem(
-                                              _selectedItem!),
+                                          updateItem(_selectedItem!),
                                     ),
                                     SizedBox(width: 10),
                                     ElevatedButton(
-                                      style: ElevatedButton
-                                          .styleFrom(
-                                        backgroundColor:
-                                        Colors.red,
-                                        shape:
-                                        RoundedRectangleBorder(
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: Colors.red,
+                                        shape: RoundedRectangleBorder(
                                           borderRadius:
-                                          BorderRadius
-                                              .circular(8),
+                                          BorderRadius.circular(8),
                                         ),
                                       ),
                                       child: Row(
-                                        mainAxisSize:
-                                        MainAxisSize.min,
+                                        mainAxisSize: MainAxisSize.min,
                                         children: [
-                                          Icon(Icons.delete,
-                                              size: 16),
+                                          Icon(Icons.delete, size: 16),
                                           SizedBox(width: 4),
                                           Text("Delete"),
                                         ],
                                       ),
-                                      onPressed: () =>
-                                          _confirmDelete(
-                                              _selectedItem![
-                                              'key']),
+                                      onPressed: () => _confirmDelete(
+                                          _selectedItem!['key']),
                                     ),
                                   ],
                                 ),
@@ -1907,7 +2177,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
               ),
             ),
 
-            /// Right Panel
+            // ── RIGHT PANEL ────────────────────────────────────────────────
             Expanded(
               flex: 2,
               child: SingleChildScrollView(
@@ -1940,12 +2210,10 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           height: 150,
                           decoration: BoxDecoration(
                             color: _cardColor,
-                            borderRadius:
-                            BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(12),
                             boxShadow: [
                               BoxShadow(
-                                color:
-                                Colors.grey.withOpacity(0.3),
+                                color: Colors.grey.withOpacity(0.3),
                                 blurRadius: 5,
                                 spreadRadius: 2,
                               )
@@ -1967,8 +2235,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                             MainAxisAlignment.center,
                             children: [
                               Icon(Icons.image,
-                                  size: 60,
-                                  color: _secondaryColor),
+                                  size: 60, color: _secondaryColor),
                               SizedBox(height: 8),
                               Text("No Image",
                                   style: TextStyle(
@@ -1986,9 +2253,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                         ),
                       SizedBox(height: 10),
                       if (_selectedItem != null &&
-                          _selectedItem![
-                          'lengthBodyCombinations'] !=
-                              null)
+                          _selectedItem!['lengthBodyCombinations'] != null)
                         _buildStatCard(
                           "Combinations",
                           "${(_selectedItem!['lengthBodyCombinations'] as List).length}",
@@ -1996,15 +2261,17 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           color: Colors.purple,
                         ),
                       SizedBox(height: 10),
+
+                      // ── NEW: Stock Summary card ──────────────────────
+                      _buildStockSummaryCard(),
+                      SizedBox(height: 10),
+
                       if (_selectedItem != null)
                         _buildStatCard(
                           "Avg Profit %",
                           "${_selectedItem!['profitPercentage1kg']?.toStringAsFixed(1) ?? '0.0'}%",
                           icon: Icons.trending_up,
-                          color:
-                          (_selectedItem!['profitPercentage1kg'] ??
-                              0) >=
-                              0
+                          color: (_selectedItem!['profitPercentage1kg'] ?? 0) >= 0
                               ? Colors.green
                               : Colors.red,
                         ),
@@ -2040,8 +2307,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
             children: [
               TabBar(
                 labelColor: _primaryColor,
-                unselectedLabelColor:
-                _textColor.withOpacity(0.6),
+                unselectedLabelColor: _textColor.withOpacity(0.6),
                 indicatorColor: _primaryColor,
                 tabs: [
                   Tab(text: 'Purchases'),
@@ -2070,15 +2336,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
         onPressed: () {
           Navigator.push(
             context,
-            MaterialPageRoute(
-                builder: (context) => RegisterItemPage()),
+            MaterialPageRoute(builder: (context) => RegisterItemPage()),
           ).then((_) => fetchItems());
         },
       ),
     );
   }
 
-  // ── All unchanged methods below ──────────────────────────────────────────
+  // ── All unchanged helper methods ──────────────────────────────────────────
 
   Widget _buildSalesTab() {
     return FutureBuilder(
@@ -2088,8 +2353,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
           return Center(child: CircularProgressIndicator());
         }
         if (!snapshot.hasData || snapshot.data!.isEmpty) {
-          return Center(
-              child: Text("No sales records for this item"));
+          return Center(child: Text("No sales records for this item"));
         }
         final sales = snapshot.data!;
         return Column(
@@ -2120,23 +2384,18 @@ class _ItemsListPageState extends State<ItemsListPage> {
                       contentPadding:
                       EdgeInsets.symmetric(horizontal: 12),
                       leading: Icon(Icons.sell, color: Colors.blue),
-                      title: Text(
-                          sale['customerName'] ??
-                              'Unknown Customer'),
+                      title:
+                      Text(sale['customerName'] ?? 'Unknown Customer'),
                       subtitle: Text(DateFormat.yMMMd()
                           .add_jm()
                           .format(DateTime.fromMillisecondsSinceEpoch(
                           sale['date']))),
                       trailing: Column(
-                        mainAxisAlignment:
-                        MainAxisAlignment.center,
-                        crossAxisAlignment:
-                        CrossAxisAlignment.end,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          Text(
-                              '${sale['quantity']} @ ${sale['price']}'),
-                          Text(
-                              '${sale['total'].toStringAsFixed(2)} PKR'),
+                          Text('${sale['quantity']} @ ${sale['price']}'),
+                          Text('${sale['total'].toStringAsFixed(2)} PKR'),
                         ],
                       ),
                       onTap: () => _showSaleDetails(sale),
@@ -2162,26 +2421,21 @@ class _ItemsListPageState extends State<ItemsListPage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildSaleDetailRow(
-                  "Customer",
-                  sale['customerName'] ?? 'Unknown'),
+                  "Customer", sale['customerName'] ?? 'Unknown'),
               _buildSaleDetailRow(
                   "Date",
-                  DateFormat.yMMMd().add_jm().format(
-                      sale['date'] is int
-                          ? DateTime.fromMillisecondsSinceEpoch(
-                          sale['date'])
-                          : DateTime.parse(sale['date']))),
+                  DateFormat.yMMMd().add_jm().format(sale['date'] is int
+                      ? DateTime.fromMillisecondsSinceEpoch(sale['date'])
+                      : DateTime.parse(sale['date']))),
               _buildSaleDetailRow(
                   "Invoice #", sale['filledNumber'] ?? 'N/A'),
               _buildSaleDetailRow(
-                  "Item",
-                  _selectedItem?['itemName'] ?? 'N/A'),
+                  "Item", _selectedItem?['itemName'] ?? 'N/A'),
               _buildSaleDetailRow(
                   "Quantity", sale['quantity'].toString()),
+              _buildSaleDetailRow("Price", sale['price'].toString()),
               _buildSaleDetailRow(
-                  "Price", sale['price'].toString()),
-              _buildSaleDetailRow("Total",
-                  '${sale['total'].toStringAsFixed(2)} PKR'),
+                  "Total", '${sale['total'].toStringAsFixed(2)} PKR'),
             ],
           ),
         ),
@@ -2203,8 +2457,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
           SizedBox(
               width: 80,
               child: Text("$label:",
-                  style:
-                  TextStyle(fontWeight: FontWeight.bold))),
+                  style: TextStyle(fontWeight: FontWeight.bold))),
           SizedBox(width: 10),
           Expanded(child: Text(value)),
         ],
@@ -2212,8 +2465,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
     );
   }
 
-  Future<List<Map<String, dynamic>>> _fetchItemSales(
-      String? itemKey) async {
+  Future<List<Map<String, dynamic>>> _fetchItemSales(String? itemKey) async {
     if (itemKey == null) return [];
     final database = FirebaseDatabase.instance.ref();
     List<Map<String, dynamic>> sales = [];
@@ -2222,9 +2474,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
       if (salesSnapshot.exists) {
         final allSales = salesSnapshot.value;
         if (allSales is Map) {
-          allSales.forEach(
-                  (saleKey, saleData) =>
-                  _processSaleData(saleData, sales));
+          allSales
+              .forEach((saleKey, saleData) => _processSaleData(saleData, sales));
         } else if (allSales is List) {
           for (var saleData in allSales) {
             _processSaleData(saleData, sales);
@@ -2246,15 +2497,13 @@ class _ItemsListPageState extends State<ItemsListPage> {
     return sales;
   }
 
-  void _processSaleData(dynamic saleData,
-      List<Map<String, dynamic>> sales) {
+  void _processSaleData(
+      dynamic saleData, List<Map<String, dynamic>> sales) {
     try {
-      final saleMap = saleData is Map
-          ? Map<String, dynamic>.from(saleData)
-          : {};
+      final saleMap =
+      saleData is Map ? Map<String, dynamic>.from(saleData) : {};
       if (saleMap['items'] != null) {
-        final items =
-        saleMap['items'] is List ? saleMap['items'] : [];
+        final items = saleMap['items'] is List ? saleMap['items'] : [];
         for (var item in items) {
           if (item is Map &&
               item['itemName'] == _selectedItem!['itemName']) {
@@ -2262,18 +2511,15 @@ class _ItemsListPageState extends State<ItemsListPage> {
             if (saleMap['customerName'] != null) {
               customerName = saleMap['customerName'].toString();
             } else if (saleMap['customerId'] != null) {
-              customerName =
-              "Customer ID: ${saleMap['customerId']}";
+              customerName = "Customer ID: ${saleMap['customerId']}";
             }
             dynamic dateValue =
                 saleMap['createdAt'] ?? saleMap['timestamp'];
             DateTime saleDate;
             if (dateValue is int) {
-              saleDate =
-                  DateTime.fromMillisecondsSinceEpoch(dateValue);
+              saleDate = DateTime.fromMillisecondsSinceEpoch(dateValue);
             } else if (dateValue is String) {
-              saleDate =
-                  DateTime.tryParse(dateValue) ?? DateTime.now();
+              saleDate = DateTime.tryParse(dateValue) ?? DateTime.now();
             } else {
               saleDate = DateTime.now();
             }
@@ -2286,8 +2532,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
               'total': (item['total'] ??
                   (item['qty'] ?? 0) * (item['rate'] ?? 0))
                   .toDouble(),
-              'filledNumber':
-              saleMap['filledNumber']?.toString() ?? '',
+              'filledNumber': saleMap['filledNumber']?.toString() ?? '',
             });
           }
         }
@@ -2306,10 +2551,9 @@ class _ItemsListPageState extends State<ItemsListPage> {
         padding: EdgeInsets.all(16),
         child: Column(
           children: [
-            Text(
-                "Sales Report: ${_selectedItem?['itemName']}",
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+            Text("Sales Report: ${_selectedItem?['itemName']}",
+                style:
+                TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             SizedBox(height: 10),
             Expanded(
               child: ListView.builder(
@@ -2321,26 +2565,20 @@ class _ItemsListPageState extends State<ItemsListPage> {
                     child: ListTile(
                       contentPadding:
                       EdgeInsets.symmetric(horizontal: 12),
-                      leading:
-                      Icon(Icons.sell, color: Colors.blue),
-                      title: Text(sale['customerName'] ??
-                          'Unknown Customer'),
-                      subtitle: Text(DateFormat.yMMMd()
-                          .add_jm()
-                          .format(sale['date'] is int
-                          ? DateTime.fromMillisecondsSinceEpoch(
-                          sale['date'])
-                          : DateTime.parse(sale['date']))),
+                      leading: Icon(Icons.sell, color: Colors.blue),
+                      title: Text(
+                          sale['customerName'] ?? 'Unknown Customer'),
+                      subtitle: Text(DateFormat.yMMMd().add_jm().format(
+                          sale['date'] is int
+                              ? DateTime.fromMillisecondsSinceEpoch(
+                              sale['date'])
+                              : DateTime.parse(sale['date']))),
                       trailing: Column(
-                        mainAxisAlignment:
-                        MainAxisAlignment.center,
-                        crossAxisAlignment:
-                        CrossAxisAlignment.end,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          Text(
-                              '${sale['quantity']} @ ${sale['price']}'),
-                          Text(
-                              '${sale['total'].toStringAsFixed(2)} PKR'),
+                          Text('${sale['quantity']} @ ${sale['price']}'),
+                          Text('${sale['total'].toStringAsFixed(2)} PKR'),
                         ],
                       ),
                       onTap: () => _showSaleDetails(sale),
@@ -2351,31 +2589,25 @@ class _ItemsListPageState extends State<ItemsListPage> {
             ),
             Divider(),
             Row(
-              mainAxisAlignment:
-              MainAxisAlignment.spaceBetween,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text("Total Sold:",
-                    style:
-                    TextStyle(fontWeight: FontWeight.bold)),
+                    style: TextStyle(fontWeight: FontWeight.bold)),
                 Text(
                     "${sales.fold(0.0, (sum, sale) => sum + (sale['quantity'] as num).toDouble()).toStringAsFixed(2)} units",
                     style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16)),
+                        fontWeight: FontWeight.bold, fontSize: 16)),
               ],
             ),
             Row(
-              mainAxisAlignment:
-              MainAxisAlignment.spaceBetween,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text("Total Revenue:",
-                    style:
-                    TextStyle(fontWeight: FontWeight.bold)),
+                    style: TextStyle(fontWeight: FontWeight.bold)),
                 Text(
                     "${sales.fold(0.0, (sum, sale) => sum + (sale['total'] as num).toDouble()).toStringAsFixed(2)} PKR",
                     style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16)),
+                        fontWeight: FontWeight.bold, fontSize: 16)),
               ],
             ),
           ],
@@ -2398,8 +2630,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
             Spacer(),
             IconButton(
                 onPressed: _showPurchaseReport,
-                icon:
-                Icon(Icons.details, color: _secondaryColor)),
+                icon: Icon(Icons.details, color: _secondaryColor)),
           ],
         ),
         Divider(color: _primaryColor.withOpacity(0.3)),
@@ -2415,29 +2646,23 @@ class _ItemsListPageState extends State<ItemsListPage> {
             ),
           )
               : ListView.builder(
-            itemCount:
-            min(3, _itemTransactions.length),
+            itemCount: min(3, _itemTransactions.length),
             itemBuilder: (context, index) {
-              final txn =
-              _itemTransactions[index];
+              final txn = _itemTransactions[index];
               return Card(
-                margin: EdgeInsets.symmetric(
-                    vertical: 4),
+                margin: EdgeInsets.symmetric(vertical: 4),
                 child: ListTile(
                   contentPadding:
-                  EdgeInsets.symmetric(
-                      horizontal: 8),
-                  leading: Icon(
-                      Icons.shopping_cart,
+                  EdgeInsets.symmetric(horizontal: 8),
+                  leading: Icon(Icons.shopping_cart,
                       color: Colors.green),
                   title: Text(txn['vendor']),
                   subtitle: Column(
                     crossAxisAlignment:
                     CrossAxisAlignment.start,
                     children: [
-                      Text(DateFormat('MMM dd, yyyy')
-                          .format(DateTime.parse(
-                          txn['date']))),
+                      Text(DateFormat('MMM dd, yyyy').format(
+                          DateTime.parse(txn['date']))),
                       Text(
                           'Qty: ${txn['quantity']} @ ${txn['price']}'),
                     ],
@@ -2457,8 +2682,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                               fontSize: 10)),
                     ],
                   ),
-                  onTap: () =>
-                      _showPurchaseDetails(txn),
+                  onTap: () => _showPurchaseDetails(txn),
                 ),
               );
             },
@@ -2472,15 +2696,13 @@ class _ItemsListPageState extends State<ItemsListPage> {
     return FutureBuilder(
       future: _fetchBomBuilds(_selectedItem?['key']),
       builder: (context, snapshot) {
-        if (snapshot.connectionState ==
-            ConnectionState.waiting) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
           return Center(child: CircularProgressIndicator());
         }
         if (!snapshot.hasData || snapshot.data!.isEmpty) {
           return Center(
               child: Text("No BOM build records for this item",
-                  style: TextStyle(
-                      color: _textColor.withOpacity(0.6))));
+                  style: TextStyle(color: _textColor.withOpacity(0.6))));
         }
         final builds = snapshot.data!;
         return Column(
@@ -2495,10 +2717,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
                         fontSize: 16)),
                 Spacer(),
                 IconButton(
-                    onPressed: () =>
-                        _showBomBuildReport(builds),
-                    icon: Icon(Icons.details,
-                        color: _secondaryColor)),
+                    onPressed: () => _showBomBuildReport(builds),
+                    icon: Icon(Icons.details, color: _secondaryColor)),
               ],
             ),
             Divider(color: _primaryColor.withOpacity(0.3)),
@@ -2508,18 +2728,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 itemBuilder: (context, index) {
                   final build = builds[index];
                   return Card(
-                    margin:
-                    EdgeInsets.symmetric(vertical: 4),
+                    margin: EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
                       contentPadding:
                       EdgeInsets.symmetric(horizontal: 8),
-                      leading:
-                      Icon(Icons.build, color: Colors.blue),
-                      title: Text(
-                          'Built ${build['quantityBuilt']} units'),
+                      leading: Icon(Icons.build, color: Colors.blue),
+                      title: Text('Built ${build['quantityBuilt']} units'),
                       subtitle: Column(
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(DateFormat('MMM dd, yyyy').format(
                               DateTime.fromMillisecondsSinceEpoch(
@@ -2531,20 +2747,16 @@ class _ItemsListPageState extends State<ItemsListPage> {
                         ],
                       ),
                       trailing: Column(
-                        mainAxisAlignment:
-                        MainAxisAlignment.center,
-                        crossAxisAlignment:
-                        CrossAxisAlignment.end,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
                           SizedBox(height: 4),
                           Text('View Details',
                               style: TextStyle(
-                                  color: Colors.blue,
-                                  fontSize: 10)),
+                                  color: Colors.blue, fontSize: 10)),
                         ],
                       ),
-                      onTap: () =>
-                          _showBomBuildDetails(build),
+                      onTap: () => _showBomBuildDetails(build),
                     ),
                   );
                 },
@@ -2556,8 +2768,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
     );
   }
 
-  Future<List<Map<String, dynamic>>> _fetchBomBuilds(
-      String? itemKey) async {
+  Future<List<Map<String, dynamic>>> _fetchBomBuilds(String? itemKey) async {
     if (itemKey == null) return [];
     final database = FirebaseDatabase.instance.ref();
     List<Map<String, dynamic>> builds = [];
@@ -2568,16 +2779,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
           .equalTo(itemKey)
           .get();
       if (snapshot.exists) {
-        final data =
-        snapshot.value as Map<dynamic, dynamic>;
+        final data = snapshot.value as Map<dynamic, dynamic>;
         data.forEach((key, value) {
-          final build = Map<String, dynamic>.from(
-              value as Map<dynamic, dynamic>);
+          final build =
+          Map<String, dynamic>.from(value as Map<dynamic, dynamic>);
           build['key'] = key;
           builds.add(build);
         });
-        builds.sort((a, b) =>
-            b['timestamp'].compareTo(a['timestamp']));
+        builds.sort((a, b) => b['timestamp'].compareTo(a['timestamp']));
       }
     } catch (e) {
       print('Error fetching BOM builds: $e');
@@ -2595,10 +2804,9 @@ class _ItemsListPageState extends State<ItemsListPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
+              _buildDetailRow("Item", build['bomItemName'] ?? 'N/A'),
               _buildDetailRow(
-                  "Item", build['bomItemName'] ?? 'N/A'),
-              _buildDetailRow("Quantity Built",
-                  build['quantityBuilt'].toString()),
+                  "Quantity Built", build['quantityBuilt'].toString()),
               _buildDetailRow(
                   "Date",
                   DateFormat.yMMMd().add_jm().format(
@@ -2606,20 +2814,17 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           build['timestamp']))),
               SizedBox(height: 16),
               Text("Components Used:",
-                  style:
-                  TextStyle(fontWeight: FontWeight.bold)),
+                  style: TextStyle(fontWeight: FontWeight.bold)),
               ...(build['components'] as List?)
                   ?.map<Widget>((component) {
                 return Padding(
-                  padding: const EdgeInsets.symmetric(
-                      vertical: 4),
+                  padding: const EdgeInsets.symmetric(vertical: 4),
                   child: Row(
                     children: [
                       Expanded(
                           flex: 2,
                           child: Text(
-                              component['name'] ??
-                                  'Unknown')),
+                              component['name'] ?? 'Unknown')),
                       Expanded(
                           child: Text(
                               '${component['quantityUsed']} ${component['unit']}')),
@@ -2640,8 +2845,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
     );
   }
 
-  void _showBomBuildReport(
-      List<Map<String, dynamic>> builds) {
+  void _showBomBuildReport(List<Map<String, dynamic>> builds) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -2650,11 +2854,9 @@ class _ItemsListPageState extends State<ItemsListPage> {
         padding: EdgeInsets.all(16),
         child: Column(
           children: [
-            Text(
-                "BOM Build Report: ${_selectedItem?['itemName']}",
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold)),
+            Text("BOM Build Report: ${_selectedItem?['itemName']}",
+                style:
+                TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             SizedBox(height: 10),
             Expanded(
               child: ListView.builder(
@@ -2662,36 +2864,28 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 itemBuilder: (context, index) {
                   final build = builds[index];
                   return Card(
-                    margin:
-                    EdgeInsets.symmetric(vertical: 4),
+                    margin: EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
                       contentPadding:
                       EdgeInsets.symmetric(horizontal: 12),
-                      leading:
-                      Icon(Icons.build, color: Colors.blue),
-                      title: Text(
-                          'Built ${build['quantityBuilt']} units'),
-                      subtitle: Text(DateFormat.yMMMd()
-                          .add_jm()
-                          .format(
+                      leading: Icon(Icons.build, color: Colors.blue),
+                      title:
+                      Text('Built ${build['quantityBuilt']} units'),
+                      subtitle: Text(DateFormat.yMMMd().add_jm().format(
                           DateTime.fromMillisecondsSinceEpoch(
                               build['timestamp']))),
                       trailing: Column(
-                        mainAxisAlignment:
-                        MainAxisAlignment.center,
-                        crossAxisAlignment:
-                        CrossAxisAlignment.end,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
                           Text(
                               '${build['components']?.length ?? 0} components'),
                           Text('View',
                               style: TextStyle(
-                                  color: Colors.blue,
-                                  fontSize: 10)),
+                                  color: Colors.blue, fontSize: 10)),
                         ],
                       ),
-                      onTap: () =>
-                          _showBomBuildDetails(build),
+                      onTap: () => _showBomBuildDetails(build),
                     ),
                   );
                 },
@@ -2699,17 +2893,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
             ),
             Divider(),
             Row(
-              mainAxisAlignment:
-              MainAxisAlignment.spaceBetween,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text("Total Built:",
-                    style:
-                    TextStyle(fontWeight: FontWeight.bold)),
+                    style: TextStyle(fontWeight: FontWeight.bold)),
                 Text(
                     "${builds.fold(0, (sum, build) => sum + (build['quantityBuilt'] as num).toInt())} units",
                     style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16)),
+                        fontWeight: FontWeight.bold, fontSize: 16)),
               ],
             ),
           ],
@@ -2718,31 +2909,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
     );
   }
 
-  double _calculateEffectiveCost(
-      Map<String, dynamic> item) {
-    if (item['isBOM'] == true && item['components'] != null) {
-      double totalCost = 0.0;
-      for (var component in item['components']) {
-        double quantity = double.tryParse(
-            component['quantity'].toString()) ??
-            0;
-        double price =
-            double.tryParse(component['price'].toString()) ??
-                0;
-        totalCost += quantity * price;
-      }
-      return totalCost;
-    } else {
-      return double.tryParse(
-          item['avgCostPricePerKg']?.toString() ??
-              item['costPrice1kg']?.toString() ??
-              '0') ??
-          0;
-    }
-  }
-
-  void _showPurchaseDetails(
-      Map<String, dynamic> purchase) {
+  void _showPurchaseDetails(Map<String, dynamic> purchase) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -2754,18 +2921,18 @@ class _ItemsListPageState extends State<ItemsListPage> {
             children: [
               _buildPurchaseDetailRow(
                   "Date",
-                  DateFormat.yMMMd().add_jm().format(
-                      DateTime.parse(purchase['date']))),
+                  DateFormat.yMMMd()
+                      .add_jm()
+                      .format(DateTime.parse(purchase['date']))),
+              _buildPurchaseDetailRow("Vendor", purchase['vendor']),
               _buildPurchaseDetailRow(
-                  "Vendor", purchase['vendor']),
+                  "Item", _selectedItem?['itemName'] ?? ''),
               _buildPurchaseDetailRow(
-                  "Item",
-                  _selectedItem?['itemName'] ?? ''),
-              _buildPurchaseDetailRow("Quantity",
-                  purchase['quantity'].toString()),
+                  "Quantity", purchase['quantity'].toString()),
               _buildPurchaseDetailRow(
                   "Price", purchase['price'].toString()),
-              _buildPurchaseDetailRow("Total",
+              _buildPurchaseDetailRow(
+                  "Total",
                   '${purchase['total'].toStringAsFixed(2)} PKR'),
             ],
           ),
@@ -2779,8 +2946,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
     );
   }
 
-  Widget _buildPurchaseDetailRow(
-      String label, String value) {
+  Widget _buildPurchaseDetailRow(String label, String value) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -2789,8 +2955,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
           SizedBox(
               width: 80,
               child: Text("$label:",
-                  style:
-                  TextStyle(fontWeight: FontWeight.bold))),
+                  style: TextStyle(fontWeight: FontWeight.bold))),
           SizedBox(width: 10),
           Expanded(child: Text(value)),
         ],
@@ -2807,11 +2972,9 @@ class _ItemsListPageState extends State<ItemsListPage> {
         padding: EdgeInsets.all(16),
         child: Column(
           children: [
-            Text(
-                "Purchase Report: ${_selectedItem?['itemName']}",
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold)),
+            Text("Purchase Report: ${_selectedItem?['itemName']}",
+                style:
+                TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             SizedBox(height: 10),
             Expanded(
               child: ListView.builder(
@@ -2819,8 +2982,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 itemBuilder: (context, index) {
                   final txn = _itemTransactions[index];
                   return Card(
-                    margin:
-                    EdgeInsets.symmetric(vertical: 4),
+                    margin: EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
                       contentPadding:
                       EdgeInsets.symmetric(horizontal: 12),
@@ -2829,22 +2991,17 @@ class _ItemsListPageState extends State<ItemsListPage> {
                       title: Text(txn['vendor']),
                       subtitle: Text(DateFormat.yMMMd()
                           .add_jm()
-                          .format(
-                          DateTime.parse(txn['date']))),
+                          .format(DateTime.parse(txn['date']))),
                       trailing: Column(
-                        mainAxisAlignment:
-                        MainAxisAlignment.center,
-                        crossAxisAlignment:
-                        CrossAxisAlignment.end,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          Text(
-                              '${txn['quantity']} @ ${txn['price']}'),
+                          Text('${txn['quantity']} @ ${txn['price']}'),
                           Text(
                               '${txn['total'].toStringAsFixed(2)} PKR'),
                         ],
                       ),
-                      onTap: () =>
-                          _showPurchaseDetails(txn),
+                      onTap: () => _showPurchaseDetails(txn),
                     ),
                   );
                 },
@@ -2852,17 +3009,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
             ),
             Divider(),
             Row(
-              mainAxisAlignment:
-              MainAxisAlignment.spaceBetween,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text("Total Purchases:",
-                    style:
-                    TextStyle(fontWeight: FontWeight.bold)),
+                    style: TextStyle(fontWeight: FontWeight.bold)),
                 Text(
                     "${_calculateTotalPurchases().toStringAsFixed(2)} PKR",
                     style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16)),
+                        fontWeight: FontWeight.bold, fontSize: 16)),
               ],
             ),
           ],
@@ -2876,8 +3030,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
         0.0, (sum, txn) => sum + (txn['total'] as double));
   }
 
-  void _showImagePreview(
-      BuildContext context, String imageBase64) {
+  void _showImagePreview(BuildContext context, String imageBase64) {
     showDialog(
       context: context,
       builder: (context) => Dialog(
@@ -2890,18 +3043,15 @@ class _ItemsListPageState extends State<ItemsListPage> {
               minScale: 0.5,
               maxScale: 4,
               child: kIsWeb
-                  ? Image.network(
-                  'data:image/png;base64,$imageBase64')
+                  ? Image.network('data:image/png;base64,$imageBase64')
                   : Image.memory(base64Decode(imageBase64)),
             ),
             Positioned(
               top: 10,
               right: 10,
               child: IconButton(
-                icon: Icon(Icons.close,
-                    color: Colors.white, size: 30),
-                onPressed: () =>
-                    Navigator.of(context).pop(),
+                icon: Icon(Icons.close, color: Colors.white, size: 30),
+                onPressed: () => Navigator.of(context).pop(),
               ),
             ),
           ],
@@ -2913,9 +3063,10 @@ class _ItemsListPageState extends State<ItemsListPage> {
   Widget _buildStatCard(String title, String value,
       {IconData? icon, Color? color}) {
     return Card(
+      margin: EdgeInsets.symmetric(horizontal: 8),
       elevation: 2,
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8)),
+      shape:
+      RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       child: Padding(
         padding: EdgeInsets.all(12),
         child: Row(
@@ -2924,8 +3075,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
               Container(
                 padding: EdgeInsets.all(6),
                 decoration: BoxDecoration(
-                  color:
-                  (color ?? _primaryColor).withOpacity(0.1),
+                  color: (color ?? _primaryColor).withOpacity(0.1),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Icon(icon,
@@ -2967,9 +3117,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
             child: Text("$label:",
                 style: TextStyle(
                     color: _textColor,
-                    fontWeight: isBold
-                        ? FontWeight.bold
-                        : FontWeight.normal,
+                    fontWeight:
+                    isBold ? FontWeight.bold : FontWeight.normal,
                     fontSize: fontSize)),
           ),
           SizedBox(width: 10),
@@ -2978,22 +3127,12 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 style: TextStyle(
                     color: _textColor.withOpacity(0.8),
                     fontSize: fontSize,
-                    fontWeight: isBold
-                        ? FontWeight.bold
-                        : FontWeight.normal)),
+                    fontWeight:
+                    isBold ? FontWeight.bold : FontWeight.normal)),
           ),
         ],
       ),
     );
-  }
-
-  Future<String?> _getCustomerName(
-      String customerId) async {
-    final snapshot = await FirebaseDatabase.instance
-        .ref()
-        .child('customers/$customerId/name')
-        .get();
-    return snapshot.exists ? snapshot.value.toString() : null;
   }
 
   @override

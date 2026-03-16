@@ -1310,7 +1310,7 @@ class _CustomerListState extends State<CustomerList> {
             DataColumn(label: Text('City')),
             DataColumn(label: Text('Phone')),
             DataColumn(label: Text('Balance')),
-            DataColumn(label: Text('Receive Payments')),
+            DataColumn(label: Text('Receive')),
             DataColumn(label: Text('Actions')),
             DataColumn(label: Text('Prices')),
             DataColumn(label: Text('Payments')),

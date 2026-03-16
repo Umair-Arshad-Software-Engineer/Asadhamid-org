@@ -265,264 +265,308 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
   }
 
 
-  Future<void> _updateInventoryQuantities(List<PurchaseItem> validItems, String purchaseId) async {
-    final database = FirebaseDatabase.instance.ref();
-
-    final componentConsumptionRef = database.child('componentConsumption').child(purchaseId);
-    Map<String, Map<String, dynamic>> missingComponents = {};
-
-    for (var purchaseItem in validItems) {
-      String itemName = purchaseItem.itemNameController.text;
-
-      // Calculate total weight purchased (quantity × weight per unit)
-      double quantity = double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
-      double weightPerUnit = double.tryParse(purchaseItem.weightController.text) ?? 0.0;
-      double totalWeightPurchased = quantity * weightPerUnit;
-
-      double purchasePrice = double.tryParse(purchaseItem.priceController.text) ?? 0.0;
-
-      var existingItem = _items.firstWhere(
-            (inventoryItem) => inventoryItem['itemName'].toLowerCase() == itemName.toLowerCase(),
-        orElse: () => {},
-      );
-
-      if (existingItem.isNotEmpty) {
-        String itemKey = existingItem['key'];
-        double currentQty = existingItem['qtyOnHand']?.toDouble() ?? 0.0;
-
-        // For edit mode, we already reverted the old quantities, so we can just add the new ones
-        // For create mode, we add the new quantities normally
-        // Increase inventory by TOTAL WEIGHT (quantity × weight per unit)
-        await database.child('items').child(itemKey).update({
-          'qtyOnHand': currentQty + totalWeightPurchased,
-          'costPrice': purchasePrice,
-        });
-
-        // Handle BOM components - still use quantity for BOM production
-        if (existingItem['isBOM'] == true) {
-          dynamic componentsData = existingItem['components'];
-          Map<String, dynamic> components = {};
-
-          // Safely convert components data to a map
-          if (componentsData is Map) {
-            components = componentsData.cast<String, dynamic>();
-          } else if (componentsData is List) {
-            // Handle list format if needed
-            for (int i = 0; i < componentsData.length; i += 2) {
-              if (i + 1 < componentsData.length) {
-                components[componentsData[i].toString()] = componentsData[i + 1];
-              }
-            }
-          }
-
-          Map<String, dynamic> consumptionRecord = {
-            'bomItemName': itemName,
-            'bomItemKey': itemKey,
-            'quantityProduced': quantity, // Still use quantity for BOM
-            'totalWeightProduced': totalWeightPurchased, // Add total weight produced
-            'timestamp': _selectedDateTime.toString(),
-            'components': {},
-          };
-
-          for (var componentEntry in components.entries) {
-            String componentName = componentEntry.key;
-            double qtyPerUnit = 0.0;
-
-            // Safely parse the quantity per unit
-            if (componentEntry.value is num) {
-              qtyPerUnit = (componentEntry.value as num).toDouble();
-            } else if (componentEntry.value is String) {
-              qtyPerUnit = double.tryParse(componentEntry.value as String) ?? 0.0;
-            }
-
-            double totalQtyRequired = qtyPerUnit * quantity; // Still use quantity for BOM component calculation
-
-            var componentItem = _items.firstWhere(
-                  (item) => item['itemName'].toLowerCase() == componentName.toLowerCase(),
-              orElse: () => {},
-            );
-
-            if (componentItem.isNotEmpty) {
-              String componentKey = componentItem['key'];
-              double currentQty = componentItem['qtyOnHand']?.toDouble() ?? 0.0;
-
-              if (currentQty < totalQtyRequired) {
-                missingComponents[componentKey] = {
-                  'name': componentName,
-                  'requiredQty': totalQtyRequired,
-                  'availableQty': currentQty,
-                  'unit': componentItem['unit'] ?? '',
-                };
-              }
-
-              consumptionRecord['components'][componentName] = {
-                'required': totalQtyRequired,
-                'used': currentQty >= totalQtyRequired ? totalQtyRequired : currentQty,
-                'remaining': currentQty >= totalQtyRequired
-                    ? currentQty - totalQtyRequired
-                    : 0.0,
-              };
-            }
-          }
-
-          await componentConsumptionRef.set(consumptionRecord);
-        }
+  Future<int> _findCombinationIndex(
+      DatabaseReference db, String itemKey, String length, String bodyType) async {
+    final snap =
+    await db.child('items/$itemKey/lengthBodyCombinations').get();
+    if (!snap.exists) return -1;
+    final List<dynamic> raw = snap.value as List<dynamic>;
+    for (int i = 0; i < raw.length; i++) {
+      if (raw[i] == null) continue;
+      final combo = Map<String, dynamic>.from(raw[i]);
+      if (combo['length']?.toString().trim() == length.trim() &&
+          combo['bodyType']?.toString().trim() == bodyType.trim()) {
+        return i;
       }
     }
-
-    // Handle missing components dialog (same as before)
-    if (missingComponents.isNotEmpty) {
-      final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
-
-      bool proceed = await showDialog(
-        context: context,
-        builder: (context) {
-          return AlertDialog(
-            title: Text(languageProvider.isEnglish
-                ? 'Insufficient Components'
-                : 'اجزاء کی کمی'),
-            content: SizedBox(
-              width: double.maxFinite,
-              child: ListView(
-                shrinkWrap: true,
-                children: missingComponents.values.map((comp) {
-                  return ListTile(
-                    title: Text('${comp['name']} (${comp['unit']})'),
-                    subtitle: Text(languageProvider.isEnglish
-                        ? 'Required: ${comp['requiredQty']}, Available: ${comp['availableQty']}'
-                        : 'درکار: ${comp['requiredQty']}, دستیاب: ${comp['availableQty']}'),
-                  );
-                }).toList(),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ کریں'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: Text(languageProvider.isEnglish ? 'Proceed Anyway' : 'پھر بھی جاری رکھیں'),
-              ),
-            ],
-          );
-        },
-      );
-
-      if (!proceed) {
-        // If user cancels, revert the inventory updates
-        await _revertInventoryUpdates(validItems);
-        return;
-      }
-    }
-
-    // Deduct components (partial or full) and record consumption/wastage
-    for (var purchaseItem in validItems) {
-      String itemName = purchaseItem.itemNameController.text;
-      double quantity = double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
-
-      var existingItem = _items.firstWhere(
-            (inventoryItem) => inventoryItem['itemName'].toLowerCase() == itemName.toLowerCase(),
-        orElse: () => {},
-      );
-
-      if (existingItem.isNotEmpty && existingItem['isBOM'] == true) {
-        dynamic componentsData = existingItem['components'];
-        Map<String, dynamic> components = {};
-
-        if (componentsData is Map) {
-          components = componentsData.cast<String, dynamic>();
-        } else if (componentsData is List) {
-          for (int i = 0; i < componentsData.length; i += 2) {
-            if (i + 1 < componentsData.length) {
-              components[componentsData[i].toString()] = componentsData[i + 1];
-            }
-          }
-        }
-
-        for (var componentEntry in components.entries) {
-          String componentName = componentEntry.key;
-          double qtyPerUnit = 0.0;
-
-          if (componentEntry.value is num) {
-            qtyPerUnit = (componentEntry.value as num).toDouble();
-          } else if (componentEntry.value is String) {
-            qtyPerUnit = double.tryParse(componentEntry.value as String) ?? 0.0;
-          }
-
-          double totalQtyRequired = qtyPerUnit * quantity; // Still use quantity for BOM components
-
-          var componentItem = _items.firstWhere(
-                (item) => item['itemName'].toLowerCase() == componentName.toLowerCase(),
-            orElse: () => {},
-          );
-
-          if (componentItem.isNotEmpty) {
-            String componentKey = componentItem['key'];
-            double currentQty = componentItem['qtyOnHand']?.toDouble() ?? 0.0;
-            double qtyToDeduct = currentQty < totalQtyRequired ? currentQty : totalQtyRequired;
-
-            await database.child('items').child(componentKey).update({
-              'qtyOnHand': currentQty - qtyToDeduct,
-            });
-
-            if (qtyToDeduct < totalQtyRequired) {
-              await database.child('wastage').push().set({
-                'itemName': componentName,
-                'quantity': totalQtyRequired - qtyToDeduct,
-                'date': DateTime.now().toString(),
-                'purchaseId': purchaseId,
-                'type': 'component_shortage',
-                'relatedBOM': itemName,
-              });
-            }
-          }
-        }
-      }
-    }
+    return -1;
   }
 
+  Future<void> _updateCombinationStock(
+      DatabaseReference db,
+      String itemKey,
+      String length,
+      String bodyType,
+      double delta) async
+  {
+    if (length.trim().isEmpty || bodyType.trim().isEmpty) return;
 
-// Helper method to revert inventory updates if user cancels due to insufficient components
-  Future<void> _revertInventoryUpdates(List<PurchaseItem> validItems) async {
-    final database = FirebaseDatabase.instance.ref();
-
-    for (var purchaseItem in validItems) {
-      String itemName = purchaseItem.itemNameController.text;
-
-      // Calculate total weight to revert (quantity × weight per unit)
-      double quantity = double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
-      double weightPerUnit = double.tryParse(purchaseItem.weightController.text) ?? 0.0;
-      double totalWeightPurchased = quantity * weightPerUnit;
-
-      var existingItem = _items.firstWhere(
-            (inventoryItem) => inventoryItem['itemName'].toLowerCase() == itemName.toLowerCase(),
-        orElse: () => {},
-      );
-
-      if (existingItem.isNotEmpty) {
-        String itemKey = existingItem['key'];
-        double currentQty = existingItem['qtyOnHand']?.toDouble() ?? 0.0;
-
-        // Revert the quantity by subtracting the total weight we just added
-        await database.child('items').child(itemKey).update({
-          'qtyOnHand': currentQty - totalWeightPurchased,
-        });
-      }
+    final int idx =
+    await _findCombinationIndex(db, itemKey, length, bodyType);
+    if (idx == -1) {
+      print('⚠️ Combination "$length / $bodyType" not found in item $itemKey');
+      return;
     }
 
-    // Show cancellation message
-    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(languageProvider.isEnglish
-            ? 'Purchase cancelled due to insufficient components'
-            : 'اجزاء کی کمی کی وجہ سے خریداری منسوخ کر دی گئی')),
-      );
-    }
+    final stockSnap = await db
+        .child('items/$itemKey/lengthBodyCombinations/$idx/stockQuantity')
+        .get();
+    final double current =
+        (stockSnap.value as num?)?.toDouble() ?? 0.0;
 
-    throw Exception('Purchase cancelled due to insufficient components');
+    await db
+        .child('items/$itemKey/lengthBodyCombinations/$idx')
+        .update({'stockQuantity': current + delta});
   }
+
+//   Future<void> _updateInventoryQuantities(List<PurchaseItem> validItems, String purchaseId) async {
+//     final database = FirebaseDatabase.instance.ref();
+//
+//     final componentConsumptionRef = database.child('componentConsumption').child(purchaseId);
+//     Map<String, Map<String, dynamic>> missingComponents = {};
+//
+//     for (var purchaseItem in validItems) {
+//       String itemName = purchaseItem.itemNameController.text;
+//
+//       // Calculate total weight purchased (quantity × weight per unit)
+//       double quantity = double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
+//       double weightPerUnit = double.tryParse(purchaseItem.weightController.text) ?? 0.0;
+//       double totalWeightPurchased = quantity * weightPerUnit;
+//
+//       double purchasePrice = double.tryParse(purchaseItem.priceController.text) ?? 0.0;
+//
+//       var existingItem = _items.firstWhere(
+//             (inventoryItem) => inventoryItem['itemName'].toLowerCase() == itemName.toLowerCase(),
+//         orElse: () => {},
+//       );
+//
+//       if (existingItem.isNotEmpty) {
+//         String itemKey = existingItem['key'];
+//         double currentQty = existingItem['qtyOnHand']?.toDouble() ?? 0.0;
+//
+//         // For edit mode, we already reverted the old quantities, so we can just add the new ones
+//         // For create mode, we add the new quantities normally
+//         // Increase inventory by TOTAL WEIGHT (quantity × weight per unit)
+//         await database.child('items').child(itemKey).update({
+//           'qtyOnHand': currentQty + totalWeightPurchased,
+//           'costPrice': purchasePrice,
+//         });
+//
+//         // Handle BOM components - still use quantity for BOM production
+//         if (existingItem['isBOM'] == true) {
+//           dynamic componentsData = existingItem['components'];
+//           Map<String, dynamic> components = {};
+//
+//           // Safely convert components data to a map
+//           if (componentsData is Map) {
+//             components = componentsData.cast<String, dynamic>();
+//           } else if (componentsData is List) {
+//             // Handle list format if needed
+//             for (int i = 0; i < componentsData.length; i += 2) {
+//               if (i + 1 < componentsData.length) {
+//                 components[componentsData[i].toString()] = componentsData[i + 1];
+//               }
+//             }
+//           }
+//
+//           Map<String, dynamic> consumptionRecord = {
+//             'bomItemName': itemName,
+//             'bomItemKey': itemKey,
+//             'quantityProduced': quantity, // Still use quantity for BOM
+//             'totalWeightProduced': totalWeightPurchased, // Add total weight produced
+//             'timestamp': _selectedDateTime.toString(),
+//             'components': {},
+//           };
+//
+//           for (var componentEntry in components.entries) {
+//             String componentName = componentEntry.key;
+//             double qtyPerUnit = 0.0;
+//
+//             // Safely parse the quantity per unit
+//             if (componentEntry.value is num) {
+//               qtyPerUnit = (componentEntry.value as num).toDouble();
+//             } else if (componentEntry.value is String) {
+//               qtyPerUnit = double.tryParse(componentEntry.value as String) ?? 0.0;
+//             }
+//
+//             double totalQtyRequired = qtyPerUnit * quantity; // Still use quantity for BOM component calculation
+//
+//             var componentItem = _items.firstWhere(
+//                   (item) => item['itemName'].toLowerCase() == componentName.toLowerCase(),
+//               orElse: () => {},
+//             );
+//
+//             if (componentItem.isNotEmpty) {
+//               String componentKey = componentItem['key'];
+//               double currentQty = componentItem['qtyOnHand']?.toDouble() ?? 0.0;
+//
+//               if (currentQty < totalQtyRequired) {
+//                 missingComponents[componentKey] = {
+//                   'name': componentName,
+//                   'requiredQty': totalQtyRequired,
+//                   'availableQty': currentQty,
+//                   'unit': componentItem['unit'] ?? '',
+//                 };
+//               }
+//
+//               consumptionRecord['components'][componentName] = {
+//                 'required': totalQtyRequired,
+//                 'used': currentQty >= totalQtyRequired ? totalQtyRequired : currentQty,
+//                 'remaining': currentQty >= totalQtyRequired
+//                     ? currentQty - totalQtyRequired
+//                     : 0.0,
+//               };
+//             }
+//           }
+//
+//           await componentConsumptionRef.set(consumptionRecord);
+//         }
+//       }
+//     }
+//
+//     // Handle missing components dialog (same as before)
+//     if (missingComponents.isNotEmpty) {
+//       final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+//
+//       bool proceed = await showDialog(
+//         context: context,
+//         builder: (context) {
+//           return AlertDialog(
+//             title: Text(languageProvider.isEnglish
+//                 ? 'Insufficient Components'
+//                 : 'اجزاء کی کمی'),
+//             content: SizedBox(
+//               width: double.maxFinite,
+//               child: ListView(
+//                 shrinkWrap: true,
+//                 children: missingComponents.values.map((comp) {
+//                   return ListTile(
+//                     title: Text('${comp['name']} (${comp['unit']})'),
+//                     subtitle: Text(languageProvider.isEnglish
+//                         ? 'Required: ${comp['requiredQty']}, Available: ${comp['availableQty']}'
+//                         : 'درکار: ${comp['requiredQty']}, دستیاب: ${comp['availableQty']}'),
+//                   );
+//                 }).toList(),
+//               ),
+//             ),
+//             actions: [
+//               TextButton(
+//                 onPressed: () => Navigator.of(context).pop(false),
+//                 child: Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ کریں'),
+//               ),
+//               ElevatedButton(
+//                 onPressed: () => Navigator.of(context).pop(true),
+//                 child: Text(languageProvider.isEnglish ? 'Proceed Anyway' : 'پھر بھی جاری رکھیں'),
+//               ),
+//             ],
+//           );
+//         },
+//       );
+//
+//       if (!proceed) {
+//         // If user cancels, revert the inventory updates
+//         await _revertInventoryUpdates(validItems);
+//         return;
+//       }
+//     }
+//
+//     // Deduct components (partial or full) and record consumption/wastage
+//     for (var purchaseItem in validItems) {
+//       String itemName = purchaseItem.itemNameController.text;
+//       double quantity = double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
+//
+//       var existingItem = _items.firstWhere(
+//             (inventoryItem) => inventoryItem['itemName'].toLowerCase() == itemName.toLowerCase(),
+//         orElse: () => {},
+//       );
+//
+//       if (existingItem.isNotEmpty && existingItem['isBOM'] == true) {
+//         dynamic componentsData = existingItem['components'];
+//         Map<String, dynamic> components = {};
+//
+//         if (componentsData is Map) {
+//           components = componentsData.cast<String, dynamic>();
+//         } else if (componentsData is List) {
+//           for (int i = 0; i < componentsData.length; i += 2) {
+//             if (i + 1 < componentsData.length) {
+//               components[componentsData[i].toString()] = componentsData[i + 1];
+//             }
+//           }
+//         }
+//
+//         for (var componentEntry in components.entries) {
+//           String componentName = componentEntry.key;
+//           double qtyPerUnit = 0.0;
+//
+//           if (componentEntry.value is num) {
+//             qtyPerUnit = (componentEntry.value as num).toDouble();
+//           } else if (componentEntry.value is String) {
+//             qtyPerUnit = double.tryParse(componentEntry.value as String) ?? 0.0;
+//           }
+//
+//           double totalQtyRequired = qtyPerUnit * quantity; // Still use quantity for BOM components
+//
+//           var componentItem = _items.firstWhere(
+//                 (item) => item['itemName'].toLowerCase() == componentName.toLowerCase(),
+//             orElse: () => {},
+//           );
+//
+//           if (componentItem.isNotEmpty) {
+//             String componentKey = componentItem['key'];
+//             double currentQty = componentItem['qtyOnHand']?.toDouble() ?? 0.0;
+//             double qtyToDeduct = currentQty < totalQtyRequired ? currentQty : totalQtyRequired;
+//
+//             await database.child('items').child(componentKey).update({
+//               'qtyOnHand': currentQty - qtyToDeduct,
+//             });
+//
+//             if (qtyToDeduct < totalQtyRequired) {
+//               await database.child('wastage').push().set({
+//                 'itemName': componentName,
+//                 'quantity': totalQtyRequired - qtyToDeduct,
+//                 'date': DateTime.now().toString(),
+//                 'purchaseId': purchaseId,
+//                 'type': 'component_shortage',
+//                 'relatedBOM': itemName,
+//               });
+//             }
+//           }
+//         }
+//       }
+//     }
+//   }
+//
+//
+// // Helper method to revert inventory updates if user cancels due to insufficient components
+//   Future<void> _revertInventoryUpdates(List<PurchaseItem> validItems) async {
+//     final database = FirebaseDatabase.instance.ref();
+//
+//     for (var purchaseItem in validItems) {
+//       String itemName = purchaseItem.itemNameController.text;
+//
+//       // Calculate total weight to revert (quantity × weight per unit)
+//       double quantity = double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
+//       double weightPerUnit = double.tryParse(purchaseItem.weightController.text) ?? 0.0;
+//       double totalWeightPurchased = quantity * weightPerUnit;
+//
+//       var existingItem = _items.firstWhere(
+//             (inventoryItem) => inventoryItem['itemName'].toLowerCase() == itemName.toLowerCase(),
+//         orElse: () => {},
+//       );
+//
+//       if (existingItem.isNotEmpty) {
+//         String itemKey = existingItem['key'];
+//         double currentQty = existingItem['qtyOnHand']?.toDouble() ?? 0.0;
+//
+//         // Revert the quantity by subtracting the total weight we just added
+//         await database.child('items').child(itemKey).update({
+//           'qtyOnHand': currentQty - totalWeightPurchased,
+//         });
+//       }
+//     }
+//
+//     // Show cancellation message
+//     final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+//     if (mounted) {
+//       ScaffoldMessenger.of(context).showSnackBar(
+//         SnackBar(content: Text(languageProvider.isEnglish
+//             ? 'Purchase cancelled due to insufficient components'
+//             : 'اجزاء کی کمی کی وجہ سے خریداری منسوخ کر دی گئی')),
+//       );
+//     }
+//
+//     throw Exception('Purchase cancelled due to insufficient components');
+//   }
 
 
   Future<Map<String, dynamic>?> fetchBomForItem(String itemName) async {
@@ -1850,6 +1894,280 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
       }
     }
   }
+
+  Future<void> _updateInventoryQuantities(
+      List<PurchaseItem> validItems, String purchaseId) async {
+    final database = FirebaseDatabase.instance.ref();
+    final componentConsumptionRef =
+    database.child('componentConsumption').child(purchaseId);
+    Map<String, Map<String, dynamic>> missingComponents = {};
+
+    for (var purchaseItem in validItems) {
+      final String itemName = purchaseItem.itemNameController.text;
+      final double quantity =
+          double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
+      final double weightPerUnit =
+          double.tryParse(purchaseItem.weightController.text) ?? 0.0;
+      final double totalWeightPurchased = quantity * weightPerUnit;
+      final double purchasePrice =
+          double.tryParse(purchaseItem.priceController.text) ?? 0.0;
+      final String purchasedLength =
+      purchaseItem.lengthController.text.trim();
+      final String purchasedBodyType =
+      purchaseItem.bodyTypeController.text.trim();
+
+      var existingItem = _items.firstWhere(
+            (i) => i['itemName'].toLowerCase() == itemName.toLowerCase(),
+        orElse: () => {},
+      );
+      if (existingItem.isEmpty) continue;
+
+      final String itemKey = existingItem['key'];
+      final double currentQty =
+          (existingItem['qtyOnHand'] as num?)?.toDouble() ?? 0.0;
+
+      // 1. Top-level qtyOnHand
+      await database.child('items').child(itemKey).update({
+        'qtyOnHand': currentQty + totalWeightPurchased,
+        'costPrice': purchasePrice,
+      });
+
+      // 2. Per-combination stockQuantity
+      await _updateCombinationStock(
+          database, itemKey, purchasedLength, purchasedBodyType,
+          totalWeightPurchased);
+
+      // 3. BOM handling (unchanged from your original)
+      if (existingItem['isBOM'] == true) {
+        dynamic componentsData = existingItem['components'];
+        Map<String, dynamic> components = {};
+
+        if (componentsData is Map) {
+          components = componentsData.cast<String, dynamic>();
+        } else if (componentsData is List) {
+          for (int i = 0; i < componentsData.length; i += 2) {
+            if (i + 1 < componentsData.length) {
+              components[componentsData[i].toString()] = componentsData[i + 1];
+            }
+          }
+        }
+
+        Map<String, dynamic> consumptionRecord = {
+          'bomItemName': itemName,
+          'bomItemKey': itemKey,
+          'quantityProduced': quantity,
+          'totalWeightProduced': totalWeightPurchased,
+          'timestamp': _selectedDateTime.toString(),
+          'components': {},
+        };
+
+        for (var componentEntry in components.entries) {
+          String componentName = componentEntry.key;
+          double qtyPerUnit = 0.0;
+          if (componentEntry.value is num) {
+            qtyPerUnit = (componentEntry.value as num).toDouble();
+          } else if (componentEntry.value is String) {
+            qtyPerUnit = double.tryParse(componentEntry.value as String) ?? 0.0;
+          }
+
+          double totalQtyRequired = qtyPerUnit * quantity;
+
+          var componentItem = _items.firstWhere(
+                (item) =>
+            item['itemName'].toLowerCase() == componentName.toLowerCase(),
+            orElse: () => {},
+          );
+
+          if (componentItem.isNotEmpty) {
+            String componentKey = componentItem['key'];
+            double currentComponentQty =
+                (componentItem['qtyOnHand'] as num?)?.toDouble() ?? 0.0;
+
+            if (currentComponentQty < totalQtyRequired) {
+              missingComponents[componentKey] = {
+                'name': componentName,
+                'requiredQty': totalQtyRequired,
+                'availableQty': currentComponentQty,
+                'unit': componentItem['unit'] ?? '',
+              };
+            }
+
+            consumptionRecord['components'][componentName] = {
+              'required': totalQtyRequired,
+              'used': currentComponentQty >= totalQtyRequired
+                  ? totalQtyRequired
+                  : currentComponentQty,
+              'remaining': currentComponentQty >= totalQtyRequired
+                  ? currentComponentQty - totalQtyRequired
+                  : 0.0,
+            };
+          }
+        }
+
+        await componentConsumptionRef.set(consumptionRecord);
+      }
+    }
+
+    // Missing components dialog (unchanged)
+    if (missingComponents.isNotEmpty) {
+      final languageProvider =
+      Provider.of<LanguageProvider>(context, listen: false);
+      bool proceed = await showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(languageProvider.isEnglish
+              ? 'Insufficient Components'
+              : 'اجزاء کی کمی'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: missingComponents.values.map((comp) {
+                return ListTile(
+                  title: Text('${comp['name']} (${comp['unit']})'),
+                  subtitle: Text(languageProvider.isEnglish
+                      ? 'Required: ${comp['requiredQty']}, Available: ${comp['availableQty']}'
+                      : 'درکار: ${comp['requiredQty']}, دستیاب: ${comp['availableQty']}'),
+                );
+              }).toList(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text(
+                  languageProvider.isEnglish ? 'Cancel' : 'منسوخ کریں'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(languageProvider.isEnglish
+                  ? 'Proceed Anyway'
+                  : 'پھر بھی جاری رکھیں'),
+            ),
+          ],
+        ),
+      );
+
+      if (!proceed) {
+        await _revertInventoryUpdates(validItems);
+        return;
+      }
+    }
+
+    // Deduct BOM components (unchanged from your original)
+    for (var purchaseItem in validItems) {
+      String itemName = purchaseItem.itemNameController.text;
+      double quantity =
+          double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
+
+      var existingItem = _items.firstWhere(
+            (i) => i['itemName'].toLowerCase() == itemName.toLowerCase(),
+        orElse: () => {},
+      );
+
+      if (existingItem.isNotEmpty && existingItem['isBOM'] == true) {
+        dynamic componentsData = existingItem['components'];
+        Map<String, dynamic> components = {};
+        if (componentsData is Map) {
+          components = componentsData.cast<String, dynamic>();
+        } else if (componentsData is List) {
+          for (int i = 0; i < componentsData.length; i += 2) {
+            if (i + 1 < componentsData.length) {
+              components[componentsData[i].toString()] = componentsData[i + 1];
+            }
+          }
+        }
+
+        for (var componentEntry in components.entries) {
+          String componentName = componentEntry.key;
+          double qtyPerUnit = 0.0;
+          if (componentEntry.value is num) {
+            qtyPerUnit = (componentEntry.value as num).toDouble();
+          } else if (componentEntry.value is String) {
+            qtyPerUnit =
+                double.tryParse(componentEntry.value as String) ?? 0.0;
+          }
+          double totalQtyRequired = qtyPerUnit * quantity;
+
+          var componentItem = _items.firstWhere(
+                (item) =>
+            item['itemName'].toLowerCase() == componentName.toLowerCase(),
+            orElse: () => {},
+          );
+
+          if (componentItem.isNotEmpty) {
+            String componentKey = componentItem['key'];
+            double currentQty =
+                (componentItem['qtyOnHand'] as num?)?.toDouble() ?? 0.0;
+            double qtyToDeduct = currentQty < totalQtyRequired
+                ? currentQty
+                : totalQtyRequired;
+
+            await database.child('items').child(componentKey).update({
+              'qtyOnHand': currentQty - qtyToDeduct,
+            });
+
+            if (qtyToDeduct < totalQtyRequired) {
+              await database.child('wastage').push().set({
+                'itemName': componentName,
+                'quantity': totalQtyRequired - qtyToDeduct,
+                'date': DateTime.now().toString(),
+                'purchaseId': purchaseId,
+                'type': 'component_shortage',
+                'relatedBOM': itemName,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  Future<void> _revertInventoryUpdates(List<PurchaseItem> validItems) async {
+    final database = FirebaseDatabase.instance.ref();
+
+    for (var purchaseItem in validItems) {
+      final String itemName = purchaseItem.itemNameController.text;
+      final double quantity =
+          double.tryParse(purchaseItem.quantityController.text) ?? 0.0;
+      final double weightPerUnit =
+          double.tryParse(purchaseItem.weightController.text) ?? 0.0;
+      final double totalWeight = quantity * weightPerUnit;
+      final String length = purchaseItem.lengthController.text.trim();
+      final String bodyType = purchaseItem.bodyTypeController.text.trim();
+
+      var existingItem = _items.firstWhere(
+            (i) => i['itemName'].toLowerCase() == itemName.toLowerCase(),
+        orElse: () => {},
+      );
+      if (existingItem.isEmpty) continue;
+
+      final String itemKey = existingItem['key'];
+      final double currentQty =
+          (existingItem['qtyOnHand'] as num?)?.toDouble() ?? 0.0;
+
+      // Top-level revert
+      await database
+          .child('items')
+          .child(itemKey)
+          .update({'qtyOnHand': currentQty - totalWeight});
+
+      // Combination-level revert
+      await _updateCombinationStock(
+          database, itemKey, length, bodyType, -totalWeight);
+    }
+
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(languageProvider.isEnglish
+              ? 'Purchase cancelled due to insufficient components'
+              : 'اجزاء کی کمی کی وجہ سے خریداری منسوخ کر دی گئی')));
+    }
+    throw Exception('Purchase cancelled due to insufficient components');
+  }
+
 
   Future<void> savePurchase() async {
     if (!mounted) return;

@@ -1457,98 +1457,93 @@ class _filledpageState extends State<filledpage> {
     });
   }
 
-  // Future<void> _updateQtyOnHand(List<Map<String, dynamic>> validItems) async {
-  //   try {
-  //     for (var item in validItems) {
-  //       final itemName = item['itemName'];
-  //       if (itemName == null || itemName.isEmpty) continue;
-  //
-  //       final dbItem = _items.firstWhere(
-  //             (i) => i.itemName == itemName,
-  //         orElse: () => Item(id: '', itemName: '', costPrice: 0.0, qtyOnHand: 0.0,salePrice: 0.0),
-  //       );
-  //
-  //       if (dbItem.id.isNotEmpty) {
-  //         final String itemId = dbItem.id;
-  //         final double currentQty = dbItem.qtyOnHand ?? 0.0;
-  //         final double newQty = item['qty'] ?? 0.0;
-  //         final double initialQty = item['initialQty'] ?? 0.0;
-  //
-  //         // Calculate the difference between the new quantity and the initial quantity
-  //         double delta = initialQty - newQty;
-  //
-  //         // Update the qtyOnHand in the database
-  //         double updatedQty = currentQty + delta;
-  //
-  //         await _db.child('items/$itemId').update({'qtyOnHand': updatedQty});
-  //       }
-  //     }
-  //   } catch (e) {
-  //     print("Error updating qtyOnHand: $e");
-  //   }
-  // }
 
-  Future<void> _updateQtyOnHand(List<Map<String, dynamic>> validItems) async {
+  Future<void> _updateQtyOnHand(List<Map<String, dynamic>> rows) async {
     try {
-      for (var item in validItems) {
-        final itemName = item['itemName'];
-        if (itemName == null || itemName.isEmpty) continue;
+      for (var row in rows) {
+        final String itemName = row['itemName'] ?? '';
+        if (itemName.isEmpty) continue;
 
         final dbItem = _items.firstWhere(
               (i) => i.itemName == itemName,
-          orElse: () => Item(id: '', itemName: '',qtyOnHand: 0.0, avgCostPricePerKg: 0.0, avgSalePricePerKg: 0.0),
+          orElse: () => Item(
+              id: '',
+              itemName: '',
+              qtyOnHand: 0.0,
+              avgCostPricePerKg: 0.0,
+              avgSalePricePerKg: 0.0),
         );
+        if (dbItem.id.isEmpty) continue;
 
-        if (dbItem.id.isNotEmpty) {
-          final String itemId = dbItem.id;
-          final double currentQty = dbItem.qtyOnHand ?? 0.0;
+        // ── How much weight to deduct (top-level) ──────────────────────────
+        double weightToDeduct = 0.0;
+        if (row['calculationType'] == 'weight') {
+          final double tw = (row['totalWeight'] ?? 0.0) as double;
+          final String unit = row['weightUnit'] ?? 'kg';
+          weightToDeduct = unit == 'g'
+              ? tw / 1000
+              : unit == 'ton'
+              ? tw * 1000
+              : unit == 'lb'
+              ? tw * 0.453592
+              : tw;
+        } else {
+          weightToDeduct = (row['qty'] ?? 0.0) as double;
+        }
 
-          // NEW: Use total weight instead of qty for weight-based items
-          double weightToDeduct = 0.0;
+        final double initialWeight =
+        (row['initialWeight'] ?? weightToDeduct) as double;
 
-          if (item['calculationType'] == 'weight') {
-            // For weight-based calculation, deduct total weight
-            final totalWeight = item['totalWeight'] ?? 0.0;
-            final weightUnit = item['weightUnit'] ?? 'kg';
+        // delta > 0  → restore stock (editing/deleting)
+        // delta < 0  → deduct stock (new invoice)
+        double delta = initialWeight - weightToDeduct;
+        final bool isExistingInvoice = widget.filled != null &&
+            widget.filled!['filledNumber'] != null &&
+            !(widget.filled!['isFromQuotation'] ?? false);
+        if (isExistingInvoice) delta = -delta;
 
-            // Convert to common unit (kg) if needed
-            if (weightUnit == 'g') {
-              weightToDeduct = totalWeight / 1000; // Convert grams to kg
-            } else if (weightUnit == 'ton') {
-              weightToDeduct = totalWeight * 1000; // Convert tons to kg
-            } else if (weightUnit == 'lb') {
-              weightToDeduct = totalWeight * 0.453592; // Convert lbs to kg
-            } else {
-              weightToDeduct = totalWeight; // Already in kg
-            }
-          } else {
-            // For quantity-based calculation, use quantity
-            weightToDeduct = item['qty'] ?? 0.0;
-          }
+        // ── 1. Top-level qtyOnHand ──────────────────────────────────────────
+        final double updatedQty = dbItem.qtyOnHand + delta;
+        await _db
+            .child('items/${dbItem.id}')
+            .update({'qtyOnHand': updatedQty});
 
-          final double initialWeight = item['initialWeight'] ?? weightToDeduct;
-          double delta = initialWeight - weightToDeduct;
+        // ── 2. Per-combination stockQuantity ───────────────────────────────
+        final String rowLength = (row['length'] ?? '').toString().trim();
+        final String rowBodyType = (row['bodyType'] ?? '').toString().trim();
 
-          // For editing existing invoices, we need to adjust based on whether weight increased or decreased
-          if (widget.filled != null && widget.filled!['filledNumber'] != null) {
-            delta = -delta; // Reverse the delta for editing
-          }
-
-          // Update the qtyOnHand in the database (treating it as weight in kg)
-          double updatedWeight = currentQty + delta;
-
-          await _db.child('items/$itemId').update({'qtyOnHand': updatedWeight});
-
-          print('Stock updated for $itemName:');
-          print('  Current stock: $currentQty kg');
-          print('  Weight to deduct: $weightToDeduct kg');
-          print('  Updated stock: $updatedWeight kg');
-          print('  Calculation type: ${item['calculationType']}');
+        if (rowLength.isNotEmpty && rowBodyType.isNotEmpty) {
+          await _updateCombinationStockInDb(
+              dbItem.id, rowLength, rowBodyType, delta);
         }
       }
     } catch (e) {
-      print("Error updating qtyOnHand: $e");
+      print('Error updating qtyOnHand: $e');
     }
+  }
+
+// ─── SHARED HELPER ──────────────────────────────────────────────────────────
+  Future<void> _updateCombinationStockInDb(
+      String itemId, String length, String bodyType, double delta) async {
+    final snap =
+    await _db.child('items/$itemId/lengthBodyCombinations').get();
+    if (!snap.exists) return;
+
+    final List<dynamic> raw = snap.value as List<dynamic>;
+    for (int i = 0; i < raw.length; i++) {
+      if (raw[i] == null) continue;
+      final combo = Map<String, dynamic>.from(raw[i]);
+      if (combo['length']?.toString().trim() == length &&
+          combo['bodyType']?.toString().trim() == bodyType) {
+        final double current =
+            (combo['stockQuantity'] as num?)?.toDouble() ?? 0.0;
+        await _db
+            .child('items/$itemId/lengthBodyCombinations/$i')
+            .update({'stockQuantity': current + delta});
+        return;
+      }
+    }
+    print('⚠️ Combination "$length/$bodyType" not found for item $itemId');
   }
 
 
@@ -3056,6 +3051,13 @@ class _filledpageState extends State<filledpage> {
               double updatedQty = currentQty + quantityToRestore;
 
               await _db.child('items/$itemId').update({'qtyOnHand': updatedQty});
+
+              final String delLength = (row['length'] ?? '').toString().trim();
+              final String delBodyType = (row['bodyType'] ?? '').toString().trim();
+              if (delLength.isNotEmpty && delBodyType.isNotEmpty) {
+                await _updateCombinationStockInDb(
+                    itemId, delLength, delBodyType, quantityToRestore);
+              }
 
               print('Stock restored for $itemName:');
               print('  Quantity restored: $quantityToRestore');

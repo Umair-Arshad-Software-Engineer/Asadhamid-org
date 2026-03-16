@@ -505,31 +505,41 @@ class FilledProvider with ChangeNotifier {
         }
       }
 
-      // Update the stock (qtyOnHand) for each item
-      for (var item in items) {
-        final itemName = item['itemName'];
-        if (itemName == null || itemName.isEmpty) continue;
+      // ── Stock update loop (replaces the old one) ───────────────────────────────
+      for (var item in cleanedItems) {
+        final String itemName =
+            (item['itemName'] as String?)?.trim() ?? '';
+        if (itemName.isEmpty) continue;
 
-        // Find the item in the _items list
         final dbItem = _items.firstWhere(
               (i) => i.itemName == itemName,
-          orElse: () => Item(id: '', itemName: '', qtyOnHand: 0.0, avgCostPricePerKg: 0.0, avgSalePricePerKg: 0.0),
+          orElse: () => Item(
+              id: '',
+              itemName: '',
+              qtyOnHand: 0.0,
+              avgCostPricePerKg: 0.0,
+              avgSalePricePerKg: 0.0),
         );
+        if (dbItem.id.isEmpty) continue;
 
-        if (dbItem.id.isNotEmpty) {
-          final String itemId = dbItem.id;
-          final double currentQty = dbItem.qtyOnHand;
-          final double newQty = item['qty'] ?? 0.0;
-          final double initialQty = item['initialQty'] ?? 0.0;
+        final double currentQty = dbItem.qtyOnHand;
+        final double newQty = (item['qty'] as num?)?.toDouble() ?? 0.0;
+        final double initialQty =
+            (item['initialQty'] as num?)?.toDouble() ?? 0.0;
+        // For updates: positive delta restores, negative deducts
+        final double topDelta = initialQty - newQty;
 
-          // Calculate the difference between the initial quantity and the new quantity
-          double delta = initialQty - newQty;
+        // 1. Top-level
+        await _db
+            .child('items/${dbItem.id}')
+            .update({'qtyOnHand': currentQty + topDelta});
 
-          // Update the qtyOnHand in the database
-          double updatedQty = currentQty + delta;
-
-          await _db.child('items/$itemId').update({'qtyOnHand': updatedQty});
-        }
+        // 2. Combination-level
+        final String updLength = (item['length'] ?? '').toString().trim();
+        final String updBodyType =
+        (item['bodyType'] ?? '').toString().trim();
+        await _updateCombinationStock(
+            dbItem.id, updLength, updBodyType, topDelta);
       }
 
       // Refresh the filled list
@@ -684,6 +694,12 @@ class FilledProvider with ChangeNotifier {
 
           // Update the item in the database
           await _db.child('items').child(itemKey).update({'qtyOnHand': updatedQtyOnHand});
+
+          // ADD immediately after:
+          final String delLength = (item['length'] ?? '').toString().trim();
+          final String delBodyType = (item['bodyType'] ?? '').toString().trim();
+          await _updateCombinationStock(
+              itemKey, delLength, delBodyType, quantityToRestore);
 
           print('Stock restored for $itemName: $quantityToRestore (updated: $updatedQtyOnHand)');
         }
@@ -1657,4 +1673,33 @@ class FilledProvider with ChangeNotifier {
     _mounted = false;
     super.dispose();
   }
+
+  // ─── HELPER: update a single combination's stockQuantity in Firebase ────────
+  Future<void> _updateCombinationStock(
+      String itemKey, String length, String bodyType, double delta) async {
+    if (length.trim().isEmpty || bodyType.trim().isEmpty) return;
+
+    final snap =
+    await _db.child('items/$itemKey/lengthBodyCombinations').get();
+    if (!snap.exists) return;
+
+    final List<dynamic> raw = snap.value as List<dynamic>;
+    for (int i = 0; i < raw.length; i++) {
+      if (raw[i] == null) continue;
+      final combo = Map<String, dynamic>.from(raw[i]);
+      if (combo['length']?.toString().trim() == length.trim() &&
+          combo['bodyType']?.toString().trim() == bodyType.trim()) {
+        final double current =
+            (combo['stockQuantity'] as num?)?.toDouble() ?? 0.0;
+        await _db
+            .child('items/$itemKey/lengthBodyCombinations/$i')
+            .update({'stockQuantity': current + delta});
+        return;
+      }
+    }
+    print('⚠️ Combination "$length/$bodyType" not found in item $itemKey');
+  }
+
+
+
 }
