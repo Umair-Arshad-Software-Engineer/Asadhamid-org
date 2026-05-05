@@ -8,6 +8,7 @@ import 'package:mughal_group_branch_two/vendors/vendorchequepage.dart';
 import 'package:mughal_group_branch_two/vendors/viewvendors.dart';
 import 'package:provider/provider.dart';
 import 'Auth/login.dart';
+import 'BatchPages/batch_management_page.dart';
 import 'Category/categorylistpage.dart';
 import 'Category/categorymanagement.dart';
 import 'Customer/customerlist.dart';
@@ -182,7 +183,7 @@ class _DashboardState extends State<Dashboard> {
                 _sidebarItem(Icons.notifications_active_rounded, 'Reminders', 'یاددہانی', () => _navigateTo(context, const ReminderListPage()), languageProvider),
                 _sidebarItem(Icons.inventory_2_rounded, 'Items List', 'ٹوٹل آئٹمز', () => _navigateTo(context, ItemsListPage()), languageProvider),
                 _sidebarItem(Icons.category_rounded, 'Category Management', 'کیٹاگوری منیجمنٹ', () => _navigateTo(context, ListCategoriesPage()), languageProvider),
-                // _sidebarItem(Icons.shopping_bag_rounded, 'Purchase Order', 'خریداری کا آرڈر', () => _navigateTo(context, PurchaseOrderListPage()), languageProvider),
+                _sidebarItem(Icons.shopping_bag_rounded, 'Batch Management', 'بیچ منیجمنٹ', () => _navigateTo(context, BatchManagementPage()), languageProvider),
                 _sidebarItem(Icons.shopping_cart_checkout_rounded, 'Purchase', 'خریداری', () => _navigateTo(context, PurchaseListPage()), languageProvider),
                 _sidebarItem(Icons.storefront_rounded, 'Vendors', 'بیچنے والا', () => _navigateTo(context, const ViewVendorsPage()), languageProvider),
                 _sidebarItem(Icons.account_balance_wallet_rounded, 'Transactions', 'لین دین', () => _navigateTo(context, const LedgerSelection()), languageProvider),

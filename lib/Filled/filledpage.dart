@@ -7,7 +7,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
-import 'package:mughal_group_branch_two/Filled/gatepasspage.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:printing/printing.dart';
 import 'package:provider/provider.dart';
@@ -22,6 +21,7 @@ import 'dart:ui' as ui;
 import 'package:share_plus/share_plus.dart';
 import 'dart:html' as html;
 import '../bankmanagement/banknames.dart';
+import 'gatepasspage.dart';
 
 
 class filledpage extends StatefulWidget {
@@ -81,7 +81,96 @@ class _filledpageState extends State<filledpage> {
   Map<String, int> _customerLastNumbers = {};
   String? _lastReferenceNumber;
 
+  void _showLengthCombinationDialog(Item item, int rowIndex) async {
+    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
 
+    if (item.lengthBodyCombinations == null || item.lengthBodyCombinations!.isEmpty) {
+      return;
+    }
+
+    LengthBodyCombination? selectedCombination;
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text(
+                languageProvider.isEnglish
+                    ? 'Select Length-Body Combination'
+                    : 'لمبائی-جسم کا مجموعہ منتخب کریں',
+              ),
+              content: Container(
+                width: double.maxFinite,
+                constraints: const BoxConstraints(maxHeight: 400),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: item.lengthBodyCombinations!.length,
+                  itemBuilder: (context, index) {
+                    final combination = item.lengthBodyCombinations![index];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(vertical: 4),
+                      child: ListTile(
+                        title: Text('${item.itemName} (${combination.length} - ${combination.bodyType})'),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (combination.lengthDecimal.isNotEmpty)
+                              Text(
+                                'Decimal: ${combination.lengthDecimal}',
+                                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                              ),
+                            if (combination.weightPerUnit != null)
+                              Text(
+                                'Weight/Unit: ${combination.weightPerUnit} ${combination.weightUnit}',
+                                style: const TextStyle(fontSize: 12, color: Colors.blue),
+                              ),
+                            if (combination.costPricePerKg != null && combination.salePricePerKg != null)
+                              Text(
+                                'Price/Kg: ${combination.salePricePerKg!.toStringAsFixed(2)} PKR',
+                                style: const TextStyle(fontSize: 12, color: Colors.green),
+                              ),
+                          ],
+                        ),
+                        trailing: const Icon(Icons.arrow_forward),
+                        onTap: () {
+                          setState(() {
+                            selectedCombination = combination;
+                          });
+                          Navigator.pop(context);
+                        },
+                      ),
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                  },
+                  child: Text(languageProvider.isEnglish ? 'Skip' : 'چھوڑ دیں'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    // After dialog closes, add the item with the selected combination
+    if (selectedCombination != null) {
+      _addItemToRow(item, rowIndex, selectedCombination);
+    } else {
+      // If no combination selected, add item without combination
+      _addItemToRow(item, rowIndex, null);
+    }
+  }
 
   // Replace the _buildItemsSection method with this updated version:
   Widget _buildItemsSection(BuildContext context, LanguageProvider languageProvider,
@@ -148,6 +237,14 @@ class _filledpageState extends State<filledpage> {
                           fontWeight: FontWeight.bold,
                           color: Colors.blue[800],
                         ),
+                      ),
+                    ),
+                    // In the header Container, add after Size:
+                    Expanded(
+                      child: Text(
+                        'Batch',
+                        style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue[800]),
+                        textAlign: TextAlign.center,
                       ),
                     ),
                     Expanded(
@@ -279,7 +376,59 @@ class _filledpageState extends State<filledpage> {
                           allowManualEntry: true,
                         ),
                       ),
-
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: InkWell(
+                            onTap: () {
+                              final itemName = _filledRows[index]['itemName'] ?? '';
+                              if (itemName.isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Please select an item first')),
+                                );
+                                return;
+                              }
+                              _showBatchSelectionDialog(index, itemName);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                              decoration: BoxDecoration(
+                                border: Border.all(
+                                  color: _filledRows[index]['batchId'] != null
+                                      ? Colors.green
+                                      : Colors.grey[300]!,
+                                ),
+                                borderRadius: BorderRadius.circular(8),
+                                color: _filledRows[index]['batchId'] != null
+                                    ? Colors.green[50]
+                                    : Colors.grey[50],
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _filledRows[index]['batchNumber'] ?? 'Select Batch',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: _filledRows[index]['batchId'] != null
+                                          ? Colors.green[800]
+                                          : Colors.grey[600],
+                                      fontWeight: _filledRows[index]['batchId'] != null
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                    ),
+                                  ),
+                                  if (_filledRows[index]['availableBatchQty'] != null)
+                                    Text(
+                                      'Avail: ${(_filledRows[index]['availableBatchQty'] as double).toStringAsFixed(2)} kg',
+                                      style: TextStyle(fontSize: 10, color: Colors.grey[600]),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                       // Length field
                       Expanded(
                         // flex: 2,
@@ -776,6 +925,7 @@ class _filledpageState extends State<filledpage> {
     }
   }
 
+  // Add to _filledRows map structure
   void _addNewRow() {
     setState(() {
       _filledRows.add({
@@ -792,6 +942,9 @@ class _filledpageState extends State<filledpage> {
         'weightUnit': 'kg',
         'totalWeight': 0.0,
         'manualWeightEntry': false,
+        'batchId': null,        // NEW
+        'batchNumber': null,    // NEW
+        'availableBatches': [], // NEW
         'itemNameController': TextEditingController(),
         'sizeController': TextEditingController(),
         'lengthController': TextEditingController(),
@@ -802,6 +955,185 @@ class _filledpageState extends State<filledpage> {
         'weightController': TextEditingController(),
       });
     });
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchBatchesForItem(String itemName) async {
+    final database = FirebaseDatabase.instance.ref();
+    List<Map<String, dynamic>> batches = [];
+
+    try {
+      final snapshot = await database.child('batches').get();
+      if (snapshot.exists) {
+        final data = snapshot.value as Map<dynamic, dynamic>;
+        data.forEach((key, value) {
+          final batch = Map<String, dynamic>.from(value);
+
+          // SAFE numeric parsing - handle nulls properly
+          double quantity = 0.0;
+          if (batch['quantity'] != null) {
+            quantity = (batch['quantity'] as num).toDouble();
+          }
+
+          bool isActive = batch['isActive'] == true;
+
+          if (batch['itemName'] == itemName &&
+              quantity > 0 &&
+              isActive) {
+            // SAFE parsing for other numeric fields
+            double purchasePrice = 0.0;
+            if (batch['purchasePrice'] != null) {
+              purchasePrice = (batch['purchasePrice'] as num).toDouble();
+            } else if (batch['costPrice'] != null) {
+              purchasePrice = (batch['costPrice'] as num).toDouble();
+            }
+
+            batches.add({
+              'id': key,
+              'itemName': batch['itemName'] ?? '',
+              'itemKey': batch['itemKey'] ?? '',
+              'batchNumber': batch['batchNumber'] ?? 'N/A',
+              'quantity': quantity,
+              'remainingQty': quantity, // Use quantity as remaining
+              'purchasePrice': purchasePrice,
+              'costPrice': purchasePrice,
+              'purchaseDate': batch['timestamp']?.toString() ?? DateTime.now().toIso8601String(),
+              'isActive': isActive,
+              'vendorName': batch['vendorName'] ?? 'N/A',
+              'length': batch['length']?.toString() ?? '',
+              'bodyType': batch['bodyType']?.toString() ?? '',
+            });
+          }
+        });
+        // Sort by date (FIFO - oldest first)
+        batches.sort((a, b) {
+          try {
+            return DateTime.parse(a['purchaseDate'])
+                .compareTo(DateTime.parse(b['purchaseDate']));
+          } catch (e) {
+            return 0;
+          }
+        });
+      }
+    } catch (e) {
+      print('Error fetching batches: $e');
+    }
+    return batches;
+  }
+
+  Future<void> _showBatchSelectionDialog(int index, String itemName) async {
+    final batches = await _fetchBatchesForItem(itemName);
+    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+
+    if (batches.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(
+            languageProvider.isEnglish
+                ? 'No batches available for $itemName'
+                : '$itemName کے لیے کوئی بیچ دستیاب نہیں'
+        )),
+      );
+      return;
+    }
+
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(languageProvider.isEnglish
+            ? 'Select Batch for $itemName'
+            : '$itemName کے لیے بیچ منتخب کریں'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 400,
+          child: ListView.builder(
+            itemCount: batches.length,
+            itemBuilder: (context, i) {
+              final batch = batches[i];
+
+              // SAFE numeric extraction - handle nulls with fallbacks
+              final qty = (batch['quantity'] as num?)?.toDouble() ?? 0.0;
+              final purchasePrice = (batch['purchasePrice'] as num?)?.toDouble() ?? 0.0;
+
+              String purchaseDateStr = batch['purchaseDate']?.toString() ??
+                  batch['timestamp']?.toString() ??
+                  DateTime.now().toIso8601String();
+
+              DateTime purchaseDate;
+              try {
+                purchaseDate = DateTime.parse(purchaseDateStr);
+              } catch (e) {
+                purchaseDate = DateTime.now();
+              }
+
+              final batchNumber = batch['batchNumber']?.toString() ?? 'Batch ${i + 1}';
+              final vendorName = batch['vendorName']?.toString() ?? 'N/A';
+              final length = batch['length']?.toString() ?? '';
+              final bodyType = batch['bodyType']?.toString() ?? '';
+
+              return Card(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                child: ListTile(
+                  title: Text(
+                    batchNumber,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Available: ${qty.toStringAsFixed(2)} kg',
+                        style: TextStyle(
+                          color: qty < 100 ? Colors.orange : Colors.green,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text('Purchase Price: ${purchasePrice.toStringAsFixed(2)} PKR/kg'),
+                      Text('Vendor: $vendorName'),
+                      if (length.isNotEmpty || bodyType.isNotEmpty)
+                        Text('Size: $length - $bodyType'),
+                      Text(
+                        'Date: ${DateFormat('dd MMM yyyy').format(purchaseDate)}',
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                    ],
+                  ),
+                  trailing: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                    onPressed: () {
+                      setState(() {
+                        _filledRows[index]['batchId'] = batch['id'];
+                        _filledRows[index]['batchNumber'] = batchNumber;
+                        _filledRows[index]['availableBatchQty'] = qty;
+                        _filledRows[index]['batchPurchasePrice'] = purchasePrice;
+                        // Optionally auto-fill rate with purchase price
+                        // _filledRows[index]['rate'] = purchasePrice;
+                        // _filledRows[index]['rateController'].text = purchasePrice.toStringAsFixed(2);
+                      });
+                      Navigator.pop(context);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Batch $batchNumber selected'),
+                          duration: const Duration(seconds: 1),
+                        ),
+                      );
+                    },
+                    child: const Text(
+                      'Select',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _updateRow(int index, String field, dynamic value) {
@@ -849,41 +1181,23 @@ class _filledpageState extends State<filledpage> {
   Future<Uint8List> _generatePDFBytes(String filledNumber) async {
     final pdf = pw.Document();
 
-    // ── Providers ────────────────────────────────────────────────
+    // ✅ Providers
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
     final customerProvider =
     Provider.of<CustomerProvider>(context, listen: false);
     final filledProvider =
     Provider.of<FilledProvider>(context, listen: false);
 
     final filled = widget.filled ?? _currentFilled;
-    if (filled == null) throw Exception('No invoice data available');
+    if (filled == null) throw Exception("No invoice data available");
 
-    // ── Filter empty rows ─────────────────────────────────────────
+    // ✅ Filter empty rows
     final nonEmptyRows = _filledRows
         .where((row) => (row['itemName'] as String).isNotEmpty)
         .toList();
 
-    // ── Pre-render Size & Length as PNG images ────────────────────
-    // Flutter's own canvas handles ½ ¼ ¾ etc. perfectly — the PDF
-    // renderer just sees opaque PNG images, no font issues at all.
-    final List<Uint8List> sizeImages = [];
-    final List<Uint8List> lengthImages = [];
-
-    for (final row in nonEmptyRows) {
-      final sizeText   = row['size']?.toString()   ?? '';
-      final lengthText = row['length']?.toString() ?? '';
-
-      sizeImages.add(await _renderTextAsImage(
-        sizeText.isNotEmpty ? sizeText : '-',
-        width: 70, height: 24,
-      ));
-      lengthImages.add(await _renderTextAsImage(
-        lengthText.isNotEmpty ? lengthText : '-',
-        width: 70, height: 24,
-      ));
-    }
-
-    // ── Payments ──────────────────────────────────────────────────
+    // ✅ Payments
     double paidAmount = 0.0;
     try {
       final payments =
@@ -891,41 +1205,48 @@ class _filledpageState extends State<filledpage> {
       paidAmount = payments.fold(
           0.0, (sum, p) => sum + (_parseToDouble(p['amount']) ?? 0.0));
     } catch (e) {
-      print('Payment fetch error: $e');
+      print("Payment fetch error: $e");
     }
 
-    final double grandTotal = _calculateGrandTotal();
-    final double remainingAmount = grandTotal - paidAmount;
+    double grandTotal = _calculateGrandTotal();
+    double remainingAmount = grandTotal - paidAmount;
 
-    // ── Ledger balance ────────────────────────────────────────────
+    // ✅ Ledger balance
     double totalRemainingBalance = 0.0;
     if (_selectedCustomerId != null) {
       try {
         totalRemainingBalance =
         await _getRemainingBalance(_selectedCustomerId!);
       } catch (e) {
-        print('Balance fetch error: $e');
+        print("Balance fetch error: $e");
       }
     }
-    final double previousBalance = totalRemainingBalance - remainingAmount;
 
-    if (_selectedCustomerId == null) throw Exception('No customer selected');
+    double previousBalance = totalRemainingBalance - remainingAmount;
+
+    if (_selectedCustomerId == null)
+      throw Exception("No customer selected");
 
     final selectedCustomer = customerProvider.customers.firstWhere(
           (c) => c.id == _selectedCustomerId,
       orElse: () => Customer(
-        id: 'unknown', name: 'Unknown', phone: '', address: '', city: '',
+        id: 'unknown',
+        name: 'Unknown',
+        phone: '',
+        address: '',
+        city: '',
       ),
     );
 
-    // ── Date ──────────────────────────────────────────────────────
+    // ✅ Date
     DateTime filledDate;
     if (widget.filled != null) {
       filledDate = DateTime.parse(widget.filled!['createdAt']);
     } else if (_dateController.text.isNotEmpty) {
-      final d   = DateTime.parse(_dateController.text);
+      final d = DateTime.parse(_dateController.text);
       final now = DateTime.now();
-      filledDate = DateTime(d.year, d.month, d.day, now.hour, now.minute, now.second);
+      filledDate =
+          DateTime(d.year, d.month, d.day, now.hour, now.minute, now.second);
     } else {
       filledDate = DateTime.now();
     }
@@ -935,121 +1256,170 @@ class _filledpageState extends State<filledpage> {
     final formattedTime =
         '${filledDate.hour}:${filledDate.minute.toString().padLeft(2, '0')}';
 
-    // ── Assets ───────────────────────────────────────────────────
+    // Get company logo
     Uint8List? logoBytes;
     try {
-      final ByteData logoData =
-      await rootBundle.load('assets/images/logo.png');
+      final ByteData logoData = await rootBundle.load('assets/images/logo.png');
       logoBytes = logoData.buffer.asUint8List();
-    } catch (_) {}
+    } catch (e) {
+      // Logo not found, will use text fallback
+    }
 
-    final lineImage = pw.MemoryImage(
-        (await rootBundle.load('assets/images/line.png'))
-            .buffer.asUint8List());
-    final footerLogo = pw.MemoryImage(
-        (await rootBundle.load('assets/images/devlogo.png'))
-            .buffer.asUint8List());
-    final jazzcashLogo = pw.MemoryImage(
-        (await rootBundle.load('assets/images/jazzcashlogo.png'))
-            .buffer.asUint8List());
-    final ublLogo = pw.MemoryImage(
-        (await rootBundle.load('assets/images/ubl.png'))
-            .buffer.asUint8List());
+    final lineImage =
+    pw.MemoryImage((await rootBundle.load('assets/images/line.png'))
+        .buffer
+        .asUint8List());
 
-    // ── Totals ────────────────────────────────────────────────────
+    final footerLogo =
+    pw.MemoryImage((await rootBundle.load('assets/images/devlogo.png'))
+        .buffer
+        .asUint8List());
+
+
+    final jazzcashLogo =
+    pw.MemoryImage((await rootBundle.load('assets/images/jazzcashlogo.png'))
+        .buffer
+        .asUint8List());
+
+
+    final ublLogo =
+    pw.MemoryImage((await rootBundle.load('assets/images/ubl.png'))
+        .buffer
+        .asUint8List());
+
+    final locationLogo =
+    pw.MemoryImage((await rootBundle.load('assets/images/location.jpeg'))
+        .buffer
+        .asUint8List());
+
     final totalQty = nonEmptyRows.fold<double>(
         0.0, (s, r) => s + (_parseToDouble(r['qty']) ?? 0.0));
 
-    final totalWeight = nonEmptyRows.fold<double>(0.0, (s, r) {
-      final weight      = r['totalWeight']   ?? 0.0;
-      final qty         = r['qty']           ?? 0.0;
+    // ✅ Calculate total weight
+    final totalWeight = nonEmptyRows.fold<double>(
+        0.0, (s, r) {
+      final weight = r['totalWeight'] ?? 0.0;
+      final qty = r['qty'] ?? 0.0;
       final weightPerUnit = r['weightPerUnit'] ?? 0.0;
-      if (r['calculationType'] == 'weight' && weight > 0) return s + weight;
-      if (weightPerUnit > 0) return s + (weightPerUnit * qty);
-      return s;
-    });
 
-    // ── Build PDF ─────────────────────────────────────────────────
+      if (r['calculationType'] == 'weight' && weight > 0) {
+        return s + weight;
+      } else if (weightPerUnit > 0) {
+        return s + (weightPerUnit * qty);
+      }
+      return s;
+    }
+    );
+
+    // ✅ PDF
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(10),
 
-        // ── HEADER (first page only) ─────────────────────────────
+        // ==================================
+        // ✅ HEADER (FIRST PAGE ONLY)
+        // ==================================
         header: (context) {
           if (context.pageNumber != 1) return pw.SizedBox();
+
           return pw.Column(
             children: [
               pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
-                  // Logo
+                  // Logo or fallback text
                   logoBytes != null
                       ? pw.Container(
-                    width: 80, height: 80,
+                    width: 80,
+                    height: 80,
                     child: pw.Image(pw.MemoryImage(logoBytes)),
                   )
                       : pw.Container(
-                    width: 80, height: 80,
+                    width: 80,
+                    height: 80,
                     decoration: pw.BoxDecoration(
                       color: PdfColors.orangeAccent,
                       borderRadius: pw.BorderRadius.circular(40),
                     ),
                     child: pw.Center(
-                      child: pw.Text('MGI',
-                          style: pw.TextStyle(
-                              fontSize: 16,
-                              fontWeight: pw.FontWeight.bold,
-                              color: PdfColors.white)),
+                      child: pw.Text(
+                        'MGI',
+                        style: pw.TextStyle(
+                          fontSize: 16,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColors.white,
+                        ),
+                      ),
                     ),
                   ),
 
-                  // Company info
+                  // Company Info
                   pw.Column(
                     crossAxisAlignment: pw.CrossAxisAlignment.center,
                     children: [
-                      pw.Text('MUGHAL GROUP OF INDUSTRIES',
-                          style: pw.TextStyle(
-                              fontSize: 16,
-                              fontWeight: pw.FontWeight.bold,
-                              color: PdfColors.blue800)),
+                      pw.Text(
+                        'MUGHAL GROUP OF INDUSTRIES',
+                        style: pw.TextStyle(
+                          fontSize: 16,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColors.blue800,
+                        ),
+                      ),
                       pw.SizedBox(height: 4),
                       pw.Text(
-                          'Specialist in Bolt, Nut, Washer & Soft/Hard Steel Wire.\n All Sizes Available | Custom Manufacturing | Factory Rate',
-                          style: pw.TextStyle(
-                              fontSize: 12, color: PdfColors.grey700)),
+                        'Specialist in Bolt, Nut, Washer & Soft/Hard Steel Wire.\n All Sizes Available | Custom Manufacturing | Factory Rate',
+                        style: pw.TextStyle(
+                          fontSize: 12,
+                          color: PdfColors.grey700,
+                        ),
+                      ),
                       pw.SizedBox(height: 4),
                       pw.Text(
-                          'Address: Gujranwala, Pakistan',
-                          style: pw.TextStyle(
-                              fontSize: 10, color: PdfColors.grey600)),
+                        'Address:  Gujranwala, Pakistan',
+                        style: pw.TextStyle(
+                          fontSize: 10,
+                          color: PdfColors.grey600,
+                        ),
+                      ),
                       pw.SizedBox(height: 4),
                       pw.Text(
-                          'Phone: 03704219219 / 03713084600 | Email: mughalgroupofindustrie@gmil.com',
-                          style: pw.TextStyle(
-                              fontSize: 10, color: PdfColors.grey600)),
+                        'Phone:  03704219219 // 03713084600 | Email: mughalgroupofindustrie@gmil.com',
+                        style: pw.TextStyle(
+                          fontSize: 10,
+                          color: PdfColors.grey600,
+                        ),
+                      ),
                     ],
                   ),
 
-                  // Ref box
+                  // Gate Pass Label
                   pw.Container(
-                    padding: const pw.EdgeInsets.all(12),
+                    padding: pw.EdgeInsets.all(12),
                     decoration: pw.BoxDecoration(
                       color: PdfColors.orangeAccent,
                       borderRadius: pw.BorderRadius.circular(8),
                     ),
-                    child: pw.Column(children: [
-                      pw.Text('Ref #',
+                    child: pw.Column(
+                      children: [
+                        pw.Text(
+                          'Ref #',
                           style: pw.TextStyle(
-                              fontSize: 14,
-                              fontWeight: pw.FontWeight.bold,
-                              color: PdfColors.white)),
-                      pw.SizedBox(height: 4),
-                      pw.Text(
+                            fontSize: 14,
+                            fontWeight: pw.FontWeight.bold,
+                            color: PdfColors.white,
+                          ),
+                        ),
+                        pw.SizedBox(height: 4),
+                        pw.Text(
                           '#${_referenceController.text.isNotEmpty ? _referenceController.text : 'Q${DateTime.now().millisecondsSinceEpoch.toString().substring(8)}'}',
                           style: pw.TextStyle(
-                              fontSize: 12, color: PdfColors.white)),
-                    ]),
+                            fontSize: 12,
+                            color: PdfColors.white,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -1058,7 +1428,9 @@ class _filledpageState extends State<filledpage> {
           );
         },
 
-        // ── FOOTER (last page only) ──────────────────────────────
+        // ==================================
+        // ✅ FOOTER (LAST PAGE ONLY)
+        // ==================================
         footer: (context) {
           if (context.pageNumber != context.pagesCount) return pw.SizedBox();
 
@@ -1087,7 +1459,7 @@ class _filledpageState extends State<filledpage> {
                         ),
                         pw.SizedBox(height: 4),
                         pw.Text(
-                          'For any queries, please contact us at 03704219219 / 03713084600 or email at mughalgroupofindustrie@gmil.com',
+                          'For any queries, please contact us at  03000450050 / 03000450020 or email at mughalgroupofindustrie@gmil.com',
                           style: pw.TextStyle(
                             fontSize: 10,
                             color: PdfColors.grey700,
@@ -1128,9 +1500,10 @@ class _filledpageState extends State<filledpage> {
           );
         },
 
-        // ── BODY ─────────────────────────────────────────────────
+        // ==================================
+        // ✅ BODY CONTENT
+        // ==================================
         build: (context) => [
-          // Customer + invoice meta
           pw.Row(
             mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
             children: [
@@ -1145,134 +1518,94 @@ class _filledpageState extends State<filledpage> {
                       style: const pw.TextStyle(fontSize: 11)),
                 ],
               ),
-              pw.Column(children: [
-                pw.Text('Date: $formattedDate $formattedTime',
-                    style: const pw.TextStyle(fontSize: 10)),
-                pw.Text('Invoice #: $filledNumber',
-                    style: const pw.TextStyle(fontSize: 12)),
-                pw.Text('Bilti Number: ${_biltiNumberController.text}',
-                    style: const pw.TextStyle(fontSize: 11)),
-                pw.Text(
-                    'Transport Company: ${_transportCompanyController.text}',
-                    style: const pw.TextStyle(fontSize: 11)),
-              ]),
+              pw.Column(
+                children: [
+                  pw.Text('Date: $formattedDate $formattedTime',
+                      style: const pw.TextStyle(fontSize: 10)),
+                  pw.Text('Invocie #: ${filledNumber}',
+                      style: const pw.TextStyle(fontSize: 12)),
+                  pw.Text('Bilti Number: ${_biltiNumberController.text}',
+                      style: const pw.TextStyle(fontSize: 11)),
+                  pw.Text(
+                      'Transport Company: ${_transportCompanyController.text}',
+                      style: const pw.TextStyle(fontSize: 11)),
+                ],
+              ),
             ],
           ),
           pw.Divider(),
           pw.SizedBox(height: 10),
-
-          // ── Items table (manual pw.Table so we can embed images) ──
+          // ✅ Table with all columns from UI
           pw.Table(
             border: pw.TableBorder.all(width: 0.5),
             columnWidths: const {
-              // 0: pw.FlexColumnWidth(2.5), // Item Name
-              0: pw.FlexColumnWidth(1.8), // Size   ← image
-              1: pw.FlexColumnWidth(1.8), // Length ← image
+              0: pw.FlexColumnWidth(3),  // Item Name
+              1: pw.FlexColumnWidth(2),  // Length
               2: pw.FlexColumnWidth(1.5), // Body Type
               3: pw.FlexColumnWidth(2.5), // Description
-              4: pw.FlexColumnWidth(1.0), // Qty
+              4: pw.FlexColumnWidth(1),  // Qty
               5: pw.FlexColumnWidth(1.5), // Weight
               6: pw.FlexColumnWidth(1.5), // Rate
               7: pw.FlexColumnWidth(1.5), // Total
             },
             children: [
-              // ── Header row ──────────────────────────────────────
+              // Header row
               pw.TableRow(
-                decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+                decoration:
+                const pw.BoxDecoration(color: PdfColors.grey300),
                 children: [
-                  // 'Item Name',
-                  'Size',
-                  'Length',
-                  'Body Type',
-                  'Description',
-                  'Qty',
-                  'Weight',
-                  'Rate',
-                  'Total',
-                ].map(_hcell).toList(),
+                  _hcell('Item Name'),
+                  _hcell('Length'),
+                  _hcell('Body Type'),
+                  _hcell('Description'),
+                  _hcell('Qty'),
+                  _hcell('Weight'),
+                  _hcell('Rate'),
+                  _hcell('Total'),
+                ],
               ),
 
-              // ── Data rows ───────────────────────────────────────
-              ...List.generate(nonEmptyRows.length, (i) {
-                final r = nonEmptyRows[i];
-
-                // Weight display text
+              // Data rows
+              ...nonEmptyRows.map((r) {
+                // Get weight display text
                 String weightText = '';
                 if (r['calculationType'] == 'weight') {
-                  if ((r['totalWeight'] ?? 0.0) > 0) {
-                    weightText =
-                    '${(r['totalWeight'] as double).toStringAsFixed(2)} ${r['weightUnit'] ?? 'kg'}';
-                  } else if ((r['weightPerUnit'] ?? 0.0) > 0) {
-                    final w =
-                    (r['weightPerUnit'] * (r['qty'] ?? 1)).toStringAsFixed(2);
-                    weightText = '$w ${r['weightUnit'] ?? 'kg'}';
+                  if (r['totalWeight'] != null && r['totalWeight'] > 0) {
+                    weightText = '${r['totalWeight'].toStringAsFixed(2)} ${r['weightUnit'] ?? 'kg'}';
+                  } else if (r['weightPerUnit'] != null && r['weightPerUnit'] > 0) {
+                    final weight = (r['weightPerUnit'] * (r['qty'] ?? 1)).toStringAsFixed(2);
+                    weightText = '$weight ${r['weightUnit'] ?? 'kg'}';
                   }
                 }
 
-                // Alternate row shading
-                final bg = i % 2 == 0 ? PdfColors.white : PdfColors.grey100;
+                // Get calculation type abbreviation
+                String calcType = r['calculationType'] == 'weight' ? 'Wt×Rate' : 'Qty×Rate';
 
-                return pw.TableRow(
-                  decoration: pw.BoxDecoration(color: bg),
-                  children: [
-                    // Item Name — plain text (no fraction chars expected)
-                    // _cell(r['itemName'] ?? ''),
-
-                    // ── SIZE as image ──────────────────────────────
-                    pw.Padding(
-                      padding: const pw.EdgeInsets.all(3),
-                      child: pw.Image(
-                        pw.MemoryImage(sizeImages[i]),
-                        width: 60, height: 20,
-                        fit: pw.BoxFit.contain,
-                      ),
-                    ),
-
-                    // ── LENGTH as image ────────────────────────────
-                    pw.Padding(
-                      padding: const pw.EdgeInsets.all(3),
-                      child: pw.Image(
-                        pw.MemoryImage(lengthImages[i]),
-                        width: 60, height: 20,
-                        fit: pw.BoxFit.contain,
-                      ),
-                    ),
-
-                    // Body Type — plain text
-                    _cell(r['bodyType']?.toString() ?? ''),
-
-                    // Description — plain text
-                    _cell(r['description']?.toString() ?? ''),
-
-                    // Qty
-                    _cell((r['qty'] ?? '0').toString()),
-
-                    // Weight
-                    _cell(weightText),
-
-                    // Rate
-                    _cell((r['rate'] ?? 0).toStringAsFixed(2),
-                        align: pw.Alignment.centerRight),
-
-                    // Total
-                    _cell((r['total'] ?? 0).toStringAsFixed(2),
-                        align: pw.Alignment.centerRight),
-                  ],
-                );
+                return pw.TableRow(children: [
+                  _cell(r['itemName'] ?? ''),
+                  _cell(r['length']?.toString() ?? ''),
+                  _cell(r['bodyType']?.toString() ?? ''),
+                  _cell(r['description']?.toString() ?? ''),
+                  _cell((r['qty'] ?? '0').toString()),
+                  _cell(weightText),
+                  _cell((r['rate'] ?? 0).toStringAsFixed(2),
+                      align: pw.Alignment.centerRight),
+                  _cell((r['total'] ?? 0).toStringAsFixed(2),
+                      align: pw.Alignment.centerRight),
+                ]);
               }),
 
-              // ── Totals row ──────────────────────────────────────
+              // Total row
               pw.TableRow(
                 decoration:
                 const pw.BoxDecoration(color: PdfColors.grey300),
                 children: [
                   _hcell('Total'),
-                  // _hcell(''), // Size (image col)
-                  _hcell(''), // Length (image col)
-                  _hcell(''), // Body Type
-                  _hcell(''), // Description
+                  _hcell(''),
+                  _hcell(''),
+                  _hcell(''),
                   _hcell(totalQty.toStringAsFixed(0)),
-                  _hcell('${totalWeight.toStringAsFixed(2)} kg'),
+                  _hcell(totalWeight.toStringAsFixed(2) + ' kg'),
                   _hcell(''),
                   _hcell(_calculateSubtotal().toStringAsFixed(2)),
                 ],
@@ -1282,28 +1615,27 @@ class _filledpageState extends State<filledpage> {
 
           pw.SizedBox(height: 10),
 
-          // ── Financial summary rows ────────────────────────────
-          _totalRow('Invoice Amount', grandTotal),
-          _totalRow('Previous Balance', previousBalance,
+          _totalRow("Invoice Amount", grandTotal),
+          _totalRow("Previous Balance", previousBalance,
               highlight: previousBalance > 0),
-          _totalRow('Discount', _discount),
-          // _totalRow('Labor Charges', _mazdoori),
-          _totalRow('Total Remaining Balance', totalRemainingBalance,
+          _totalRow("Discount", _discount),
+          _totalRow("Labor Charges", _mazdoori),
+          _totalRow("Total Remaining Balance", totalRemainingBalance,
               highlight: totalRemainingBalance > 0),
 
+          // Payment information
           if (paidAmount > 0) ...[
             pw.SizedBox(height: 10),
-            _totalRow('Paid Amount', paidAmount, highlight: true),
-            _totalRow('Balance Due', remainingAmount,
-                highlight: remainingAmount > 0),
+            _totalRow("Paid Amount", paidAmount, highlight: true),
+            _totalRow("Balance Due", remainingAmount, highlight: remainingAmount > 0),
           ],
+
         ],
       ),
     );
 
     return pdf.save();
   }
-
 
 // Helper methods remain the same
   pw.Widget _hcell(String t) => pw.Padding(
@@ -1337,46 +1669,6 @@ class _filledpageState extends State<filledpage> {
                   color: highlight ? PdfColors.red : PdfColors.black)),
         ],
       );
-
-
-  Future<Uint8List> _renderTextAsImage(
-      String text, {
-        double fontSize = 18,
-        double width = 80,
-        double height = 26,
-      })
-  async {
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-
-    // White background
-    final bgPaint = Paint()..color = const Color(0xFFFFFFFF);
-    canvas.drawRect(Rect.fromLTWH(0, 0, width, height), bgPaint);
-
-    // Draw text using ui.TextDirection to avoid conflict with material TextDirection
-    final textPainter = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          color: const Color(0xFF000000),
-          fontSize: fontSize,
-          fontFamily: null, // system font — supports Unicode fractions
-        ),
-      ),
-      textDirection: ui.TextDirection.ltr, // <-- ui. prefix avoids the conflict
-      maxLines: 1,
-    );
-    textPainter.layout(maxWidth: width - 4);
-    textPainter.paint(
-      canvas,
-      Offset(2, (height - textPainter.height) / 2),
-    );
-
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(width.toInt(), height.toInt());
-    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-    return byteData!.buffer.asUint8List();
-  }
 
   Future<void> _generateAndPrintPDF() async {
     String filledNumber;
@@ -1457,94 +1749,113 @@ class _filledpageState extends State<filledpage> {
     });
   }
 
+  // Future<void> _updateQtyOnHand(List<Map<String, dynamic>> validItems) async {
+  //   try {
+  //     for (var item in validItems) {
+  //       final itemName = item['itemName'];
+  //       if (itemName == null || itemName.isEmpty) continue;
+  //
+  //       final dbItem = _items.firstWhere(
+  //             (i) => i.itemName == itemName,
+  //         orElse: () => Item(id: '', itemName: '', costPrice: 0.0, qtyOnHand: 0.0,salePrice: 0.0),
+  //       );
+  //
+  //       if (dbItem.id.isNotEmpty) {
+  //         final String itemId = dbItem.id;
+  //         final double currentQty = dbItem.qtyOnHand ?? 0.0;
+  //         final double newQty = item['qty'] ?? 0.0;
+  //         final double initialQty = item['initialQty'] ?? 0.0;
+  //
+  //         // Calculate the difference between the new quantity and the initial quantity
+  //         double delta = initialQty - newQty;
+  //
+  //         // Update the qtyOnHand in the database
+  //         double updatedQty = currentQty + delta;
+  //
+  //         await _db.child('items/$itemId').update({'qtyOnHand': updatedQty});
+  //       }
+  //     }
+  //   } catch (e) {
+  //     print("Error updating qtyOnHand: $e");
+  //   }
+  // }
 
-  Future<void> _updateQtyOnHand(List<Map<String, dynamic>> rows) async {
+  Future<void> _updateQtyOnHand(List<Map<String, dynamic>> validItems) async {
     try {
-      for (var row in rows) {
-        final String itemName = row['itemName'] ?? '';
-        if (itemName.isEmpty) continue;
+      for (var item in validItems) {
+        final itemName = item['itemName'];
+        if (itemName == null || itemName.isEmpty) continue;
 
+        final batchId = item['batchId']?.toString();
+
+        // Calculate quantity to deduct SAFELY
+        double weightToDeduct = 0.0;
+
+        if (item['calculationType'] == 'weight') {
+          final totalWeight = (item['totalWeight'] as num?)?.toDouble() ?? 0.0;
+          final weightUnit = item['weightUnit']?.toString() ?? 'kg';
+
+          if (weightUnit == 'g') {
+            weightToDeduct = totalWeight / 1000;
+          } else if (weightUnit == 'ton') {
+            weightToDeduct = totalWeight * 1000;
+          } else if (weightUnit == 'lb') {
+            weightToDeduct = totalWeight * 0.453592;
+          } else {
+            weightToDeduct = totalWeight;
+          }
+        } else {
+          weightToDeduct = (item['qty'] as num?)?.toDouble() ?? 0.0;
+        }
+
+        if (weightToDeduct <= 0) continue;
+
+        if (batchId != null && batchId.isNotEmpty) {
+          // ✅ BATCH-WISE deduction
+          final batchRef = _db.child('batches').child(batchId);
+          final batchSnapshot = await batchRef.get();
+
+          if (batchSnapshot.exists) {
+            final batchData = Map<String, dynamic>.from(batchSnapshot.value as Map);
+
+            // SAFE numeric extraction
+            final currentBatchQty = (batchData['quantity'] as num?)?.toDouble() ?? 0.0;
+            final updatedBatchQty = (currentBatchQty - weightToDeduct).clamp(0.0, double.infinity);
+
+            await batchRef.update({
+              'quantity': updatedBatchQty,
+              'remainingQty': updatedBatchQty,
+              'isActive': updatedBatchQty > 0,
+            });
+
+            print('Batch $batchId deducted: $weightToDeduct kg, remaining: $updatedBatchQty kg');
+          }
+        }
+
+        // Also update the item's total qtyOnHand
         final dbItem = _items.firstWhere(
               (i) => i.itemName == itemName,
           orElse: () => Item(
-              id: '',
-              itemName: '',
-              qtyOnHand: 0.0,
-              avgCostPricePerKg: 0.0,
-              avgSalePricePerKg: 0.0),
+            id: '',
+            itemName: '',
+            qtyOnHand: 0.0,
+            avgCostPricePerKg: 0.0,
+            avgSalePricePerKg: 0.0,
+          ),
         );
-        if (dbItem.id.isEmpty) continue;
 
-        // ── How much weight to deduct (top-level) ──────────────────────────
-        double weightToDeduct = 0.0;
-        if (row['calculationType'] == 'weight') {
-          final double tw = (row['totalWeight'] ?? 0.0) as double;
-          final String unit = row['weightUnit'] ?? 'kg';
-          weightToDeduct = unit == 'g'
-              ? tw / 1000
-              : unit == 'ton'
-              ? tw * 1000
-              : unit == 'lb'
-              ? tw * 0.453592
-              : tw;
-        } else {
-          weightToDeduct = (row['qty'] ?? 0.0) as double;
-        }
-
-        final double initialWeight =
-        (row['initialWeight'] ?? weightToDeduct) as double;
-
-        // delta > 0  → restore stock (editing/deleting)
-        // delta < 0  → deduct stock (new invoice)
-        double delta = initialWeight - weightToDeduct;
-        final bool isExistingInvoice = widget.filled != null &&
-            widget.filled!['filledNumber'] != null &&
-            !(widget.filled!['isFromQuotation'] ?? false);
-        if (isExistingInvoice) delta = -delta;
-
-        // ── 1. Top-level qtyOnHand ──────────────────────────────────────────
-        final double updatedQty = dbItem.qtyOnHand + delta;
-        await _db
-            .child('items/${dbItem.id}')
-            .update({'qtyOnHand': updatedQty});
-
-        // ── 2. Per-combination stockQuantity ───────────────────────────────
-        final String rowLength = (row['length'] ?? '').toString().trim();
-        final String rowBodyType = (row['bodyType'] ?? '').toString().trim();
-
-        if (rowLength.isNotEmpty && rowBodyType.isNotEmpty) {
-          await _updateCombinationStockInDb(
-              dbItem.id, rowLength, rowBodyType, delta);
+        if (dbItem.id.isNotEmpty) {
+          final currentQty = (dbItem.qtyOnHand ?? 0.0).toDouble();
+          await _db.child('items/${dbItem.id}').update({
+            'qtyOnHand': (currentQty - weightToDeduct).clamp(0.0, double.infinity),
+          });
         }
       }
     } catch (e) {
-      print('Error updating qtyOnHand: $e');
+      print("Error updating qty/batch: $e");
     }
   }
 
-// ─── SHARED HELPER ──────────────────────────────────────────────────────────
-  Future<void> _updateCombinationStockInDb(
-      String itemId, String length, String bodyType, double delta) async {
-    final snap =
-    await _db.child('items/$itemId/lengthBodyCombinations').get();
-    if (!snap.exists) return;
-
-    final List<dynamic> raw = snap.value as List<dynamic>;
-    for (int i = 0; i < raw.length; i++) {
-      if (raw[i] == null) continue;
-      final combo = Map<String, dynamic>.from(raw[i]);
-      if (combo['length']?.toString().trim() == length &&
-          combo['bodyType']?.toString().trim() == bodyType) {
-        final double current =
-            (combo['stockQuantity'] as num?)?.toDouble() ?? 0.0;
-        await _db
-            .child('items/$itemId/lengthBodyCombinations/$i')
-            .update({'stockQuantity': current + delta});
-        return;
-      }
-    }
-    print('⚠️ Combination "$length/$bodyType" not found for item $itemId');
-  }
 
 
   Future<void> _showDeletePaymentConfirmationDialog(
@@ -2983,7 +3294,6 @@ class _filledpageState extends State<filledpage> {
   }
 
   Future<void> _deleteInvoice(BuildContext context, LanguageProvider languageProvider) async {
-    // Store the navigator before async operations
     final navigator = Navigator.of(context);
 
     try {
@@ -2993,9 +3303,7 @@ class _filledpageState extends State<filledpage> {
         barrierDismissible: false,
         builder: (context) => WillPopScope(
           onWillPop: () async => false,
-          child: const Center(
-            child: CircularProgressIndicator(),
-          ),
+          child: const Center(child: CircularProgressIndicator()),
         ),
       );
 
@@ -3004,64 +3312,93 @@ class _filledpageState extends State<filledpage> {
       if (widget.filled != null && widget.filled!['filledNumber'] != null) {
         final filledId = widget.filled!['filledNumber']?.toString() ?? '';
 
-        // 1. Restore stock quantities
+        // 1. Restore stock quantities (batch-aware)
         if (_filledRows.isNotEmpty) {
           for (var row in _filledRows) {
             final itemName = row['itemName'];
             if (itemName == null || itemName.isEmpty) continue;
 
+            // Calculate quantity to restore based on calculation type
+            double quantityToRestore = 0.0;
+
+            if (row['calculationType'] == 'weight') {
+              final totalWeight = (row['totalWeight'] ?? 0.0) as double;
+              final weightUnit = row['weightUnit'] ?? 'kg';
+
+              switch (weightUnit) {
+                case 'g':
+                  quantityToRestore = totalWeight / 1000;
+                  break;
+                case 'ton':
+                  quantityToRestore = totalWeight * 1000;
+                  break;
+                case 'lb':
+                  quantityToRestore = totalWeight * 0.453592;
+                  break;
+                default:
+                  quantityToRestore = totalWeight;
+              }
+            } else {
+              quantityToRestore = (row['qty'] ?? 0.0) as double;
+            }
+
+            if (quantityToRestore <= 0) continue;
+
+            final batchId = row['batchId']?.toString();
+
+            // ── Restore batch quantity if batch was selected ──
+            if (batchId != null && batchId.isNotEmpty) {
+              try {
+                final batchRef = _db.child('batches').child(batchId);
+                final batchSnap = await batchRef.get();
+
+                if (batchSnap.exists) {
+                  final batchData = Map<String, dynamic>.from(
+                      batchSnap.value as Map);
+                  final currentBatchQty =
+                  (batchData['quantity'] as num).toDouble();
+                  final restoredBatchQty = currentBatchQty + quantityToRestore;
+
+                  await batchRef.update({
+                    'quantity': restoredBatchQty,
+                    'isActive': true, // Re-activate batch if it was emptied
+                  });
+
+                  print('Batch $batchId restored: '
+                      '+$quantityToRestore kg → $restoredBatchQty kg');
+                } else {
+                  print('Batch $batchId not found, skipping batch restore');
+                }
+              } catch (e) {
+                print('Error restoring batch $batchId: $e');
+                // Continue restoring other items even if one batch fails
+              }
+            }
+
+            // ── Always restore item-level qtyOnHand ──
             final dbItem = _items.firstWhere(
                   (i) => i.itemName == itemName,
               orElse: () => Item(
-                  id: '',
-                  itemName: '',
-                  qtyOnHand: 0.0,
-                  avgCostPricePerKg: 0.0,
-                  avgSalePricePerKg: 0.0
+                id: '',
+                itemName: '',
+                qtyOnHand: 0.0,
+                avgCostPricePerKg: 0.0, avgSalePricePerKg: 0.0,
               ),
             );
 
             if (dbItem.id.isNotEmpty) {
-              final String itemId = dbItem.id;
-              final double currentQty = dbItem.qtyOnHand ?? 0.0;
+              final currentQty = dbItem.qtyOnHand ?? 0.0;
+              final updatedQty = currentQty + quantityToRestore;
 
-              // Determine what to restore based on calculation type
-              double quantityToRestore = 0.0;
+              await _db.child('items/${dbItem.id}').update({
+                'qtyOnHand': updatedQty,
+              });
 
-              if (row['calculationType'] == 'weight') {
-                // For weight-based items, restore total weight
-                final totalWeight = row['totalWeight'] ?? 0.0;
-                final weightUnit = row['weightUnit'] ?? 'kg';
-
-                // Convert to kg if needed
-                if (weightUnit == 'g') {
-                  quantityToRestore = totalWeight / 1000;
-                } else if (weightUnit == 'ton') {
-                  quantityToRestore = totalWeight * 1000;
-                } else if (weightUnit == 'lb') {
-                  quantityToRestore = totalWeight * 0.453592;
-                } else {
-                  quantityToRestore = totalWeight;
-                }
-              } else {
-                // For quantity-based items, restore quantity
-                quantityToRestore = row['qty'] ?? 0.0;
-              }
-
-              double updatedQty = currentQty + quantityToRestore;
-
-              await _db.child('items/$itemId').update({'qtyOnHand': updatedQty});
-
-              final String delLength = (row['length'] ?? '').toString().trim();
-              final String delBodyType = (row['bodyType'] ?? '').toString().trim();
-              if (delLength.isNotEmpty && delBodyType.isNotEmpty) {
-                await _updateCombinationStockInDb(
-                    itemId, delLength, delBodyType, quantityToRestore);
-              }
-
-              print('Stock restored for $itemName:');
-              print('  Quantity restored: $quantityToRestore');
-              print('  Updated stock: $updatedQty');
+              print('Item stock restored for "$itemName": '
+                  '+$quantityToRestore → $updatedQty'
+                  '${batchId != null ? " (batch: $batchId)" : " (no batch)"}');
+            } else {
+              print('Item "$itemName" not found in local list, skipping item restore');
             }
           }
         }
@@ -3069,10 +3406,8 @@ class _filledpageState extends State<filledpage> {
         // 2. Delete the invoice from Firebase
         await filledProvider.deleteFilled(filledId);
 
-        // Close loading dialog if still showing
-        if (navigator.canPop()) {
-          navigator.pop();
-        }
+        // Close loading dialog
+        if (navigator.canPop()) navigator.pop();
 
         // Show success message
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3087,27 +3422,13 @@ class _filledpageState extends State<filledpage> {
           ),
         );
 
-        // Wait a moment for the snackbar to be visible
         await Future.delayed(const Duration(milliseconds: 500));
 
-        // Navigate back and clear all previous routes to filled list page
-        // This ensures we go back to the filled list without keeping the deleted invoice in the stack
         if (navigator.canPop()) {
-          // Pop all routes and go back to the filled list
           navigator.popUntil((route) => route.isFirst);
-
-          // Alternative: If you want to explicitly navigate to filled list page
-          // navigator.pushAndRemoveUntil(
-          //   MaterialPageRoute(builder: (context) => FilledListPage()),
-          //   (route) => false,
-          // );
         }
-
       } else {
-        // Close loading dialog
-        if (navigator.canPop()) {
-          navigator.pop();
-        }
+        if (navigator.canPop()) navigator.pop();
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -3123,12 +3444,8 @@ class _filledpageState extends State<filledpage> {
     } catch (e) {
       print('Error deleting invoice: $e');
 
-      // Close loading dialog if still showing
-      if (navigator.canPop()) {
-        navigator.pop();
-      }
+      if (navigator.canPop()) navigator.pop();
 
-      // Show error message
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -3657,265 +3974,170 @@ class _filledpageState extends State<filledpage> {
     }
   }
 
-  void _showLengthCombinationDialog(Item item, int rowIndex) {
-    final languageProvider =
-    Provider.of<LanguageProvider>(context, listen: false);
-    bool isProcessing = false;
+  Map<String, String> _parseBOMName(String bomName) {
+    Map<String, String> result = {
+      'size': '',
+      'length': '',
+      'bodyType': '',
+      'fullName': bomName
+    };
 
-    showDialog(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: Text(
-                languageProvider.isEnglish
-                    ? 'Select Length-Body Combination'
-                    : 'لمبائی-جسم کا مجموعہ منتخب کریں',
-              ),
-              content: Container(
-                width: double.maxFinite,
-                constraints: const BoxConstraints(maxHeight: 450),
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: item.lengthBodyCombinations!.length,
-                  itemBuilder: (context, index) {
-                    final combination = item.lengthBodyCombinations![index];
+    if (bomName.contains('|')) {
+      final parts = bomName.split('|').map((part) => part.trim()).toList();
 
-                    // ── Customer-aware price ──────────────────────────────
-                    final double effectiveRate =
-                    combination.getPriceForCustomer(_selectedCustomerId);
-                    final bool hasCustomerPrice = _selectedCustomerId != null &&
-                        combination.customerPrices
-                            .containsKey(_selectedCustomerId);
-                    final double defaultRate =
-                        combination.salePricePerKg ?? 0.0;
+      if (parts.length >= 3) {
+        result['size'] = parts[0];
+        result['length'] = parts[1];
+        result['bodyType'] = parts[2];
+      } else if (parts.length == 2) {
+        result['size'] = parts[0];
+        result['length'] = parts[1];
+      } else if (parts.length == 1) {
+        result['size'] = parts[0];
+      }
+    } else {
+      result['size'] = bomName;
+    }
 
-                    return Card(
-                      margin: const EdgeInsets.symmetric(vertical: 4),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        side: hasCustomerPrice
-                            ? const BorderSide(
-                            color: Colors.purple, width: 1.5)
-                            : BorderSide.none,
-                      ),
-                      child: ListTile(
-                        title: Text(
-                          '${item.itemName} '
-                              '(${combination.length} — ${combination.bodyType})',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (combination.lengthDecimal.isNotEmpty)
-                              Text(
-                                'Decimal: ${combination.lengthDecimal}',
-                                style: TextStyle(
-                                    fontSize: 12, color: Colors.grey[600]),
-                              ),
-                            if (combination.weightPerUnit != null)
-                              Text(
-                                'Weight/Unit: ${combination.weightPerUnit}'
-                                    ' ${combination.weightUnit}',
-                                style: TextStyle(
-                                    fontSize: 12, color: Colors.blue[700]),
-                              ),
-
-                            // ── Rate display ──────────────────────────────
-                            const SizedBox(height: 4),
-                            if (hasCustomerPrice) ...[
-                              // Show customer-specific rate prominently
-                              Row(
-                                children: [
-                                  Icon(Icons.person,
-                                      size: 14, color: Colors.purple[700]),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    'Your Rate: '
-                                        '${effectiveRate.toStringAsFixed(2)} PKR/kg',
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.purple[700],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              Text(
-                                'Default: '
-                                    '${defaultRate.toStringAsFixed(2)} PKR/kg',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.grey[500],
-                                  decoration: TextDecoration.lineThrough,
-                                ),
-                              ),
-                            ] else ...[
-                              // No customer price — show sale rate normally
-                              if (combination.salePricePerKg != null)
-                                Row(
-                                  children: [
-                                    Icon(Icons.sell,
-                                        size: 14, color: Colors.green[700]),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      'Rate: '
-                                          '${defaultRate.toStringAsFixed(2)} PKR/kg',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w500,
-                                        color: Colors.green[700],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                            ],
-                          ],
-                        ),
-                        trailing: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            if (hasCustomerPrice)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: Colors.purple[50],
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text(
-                                  'Custom',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: Colors.purple[700],
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            const SizedBox(height: 4),
-                            const Icon(Icons.arrow_forward),
-                          ],
-                        ),
-                        onTap: () {
-                          if (isProcessing) return;
-                          setDialogState(() => isProcessing = true);
-                          Navigator.pop(context);
-                          Future.delayed(const Duration(milliseconds: 100),
-                                  () => _addItemToRow(item, rowIndex, combination));
-                        },
-                      ),
-                    );
-                  },
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: Text(
-                      languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    if (isProcessing) return;
-                    setDialogState(() => isProcessing = true);
-                    Navigator.pop(context);
-                    Future.delayed(const Duration(milliseconds: 100),
-                            () => _addItemToRow(item, rowIndex, null));
-                  },
-                  child: Text(
-                      languageProvider.isEnglish ? 'Skip' : 'چھوڑ دیں'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
+    return result;
   }
 
 
-  void _addItemToRow(
-      Item item, int rowIndex, LengthBodyCombination? combination) {
-    // Item-level customer price (fallback when no combination is chosen)
-    final double customerPrice = item.getPriceForCustomer(_selectedCustomerId);
+
+  void _addItemToRow(Item item, int rowIndex, LengthBodyCombination? combination) {
+    final customerPrice = item.getPriceForCustomer(_selectedCustomerId);
+    double? salePricePerKg = combination?.salePricePerKg;
+
+    // Check if weight was manually entered before resetting
+    final wasManualWeight = _filledRows[rowIndex]['weightController']?.text.isNotEmpty == true &&
+        _filledRows[rowIndex]['calculationType'] == 'weight';
+    final manualWeightText = wasManualWeight
+        ? _filledRows[rowIndex]['weightController'].text
+        : null;
+
+    // Parse BOM name if it's in the format "Size | Length | Body Type"
+    String size = '';
+    String length = '';
+    String bodyType = '';
+
+    // Improved parsing logic
+    if (item.itemName.contains('|')) {
+      final parts = item.itemName.split('|').map((part) => part.trim()).toList();
+
+      if (parts.length >= 3) {
+        // Assuming format is always: "Size | Length | Body Type"
+        size = parts[0];
+        length = parts[1];
+        bodyType = parts[2];
+      } else if (parts.length == 2) {
+        // Handle case with only 2 parts
+        size = parts[0];
+        length = parts[1];
+        bodyType = '';
+      } else if (parts.length == 1) {
+        // Handle case with only 1 part
+        size = parts[0];
+        length = '';
+        bodyType = '';
+      }
+    } else {
+      // If no pipe separator, treat whole name as size
+      size = item.itemName;
+      length = '';
+      bodyType = '';
+    }
 
     setState(() {
-      // Ensure controllers exist
-      _filledRows[rowIndex]['sizeController'] ??= TextEditingController();
-      _filledRows[rowIndex]['lengthController'] ??= TextEditingController();
-      _filledRows[rowIndex]['bodyTypeController'] ??= TextEditingController();
-      _filledRows[rowIndex]['weightController'] ??= TextEditingController();
-      _filledRows[rowIndex]['totalWeightController'] ??=
-          TextEditingController();
+      // Ensure all controllers exist
+      if (_filledRows[rowIndex]['sizeController'] == null) {
+        _filledRows[rowIndex]['sizeController'] = TextEditingController();
+      }
+      if (_filledRows[rowIndex]['lengthController'] == null) {
+        _filledRows[rowIndex]['lengthController'] = TextEditingController();
+      }
+      if (_filledRows[rowIndex]['bodyTypeController'] == null) {
+        _filledRows[rowIndex]['bodyTypeController'] = TextEditingController();
+      }
+      if (_filledRows[rowIndex]['weightController'] == null) {
+        _filledRows[rowIndex]['weightController'] = TextEditingController();
+      }
+      if (_filledRows[rowIndex]['totalWeightController'] == null) {
+        _filledRows[rowIndex]['totalWeightController'] = TextEditingController();
+      }
 
       _filledRows[rowIndex]['itemName'] = item.itemName;
-      _filledRows[rowIndex]['itemNameController'].text = item.itemName;
+      // IMPORTANT: Set itemNameController to only show SIZE (first part)
+      _filledRows[rowIndex]['itemNameController'].text = size;  // Changed from item.itemName to size
 
-      // Reset weight info
-      _filledRows[rowIndex]['weightPerUnit'] = null;
-      _filledRows[rowIndex]['weightUnit'] = 'kg';
-      _filledRows[rowIndex]['lengthBodyCombination'] = null;
+      // Set the parsed BOM fields
+      _filledRows[rowIndex]['sizeController'].text = size;
+      _filledRows[rowIndex]['lengthController'].text = length;
+      _filledRows[rowIndex]['bodyTypeController'].text = bodyType;
+      _filledRows[rowIndex]['size'] = size;
+      _filledRows[rowIndex]['length'] = length;
+      _filledRows[rowIndex]['bodyType'] = bodyType;
 
       if (combination != null) {
-        // ── Combination-level customer price ─────────────────────────────
-        // getPriceForCustomer returns the customer-specific price if set,
-        // otherwise falls back to salePricePerKg.
-        final double effectiveRate =
-        combination.getPriceForCustomer(_selectedCustomerId);
-
-        _filledRows[rowIndex]['sizeController'].text = combination.length;
+        // Override with combination values if available
         _filledRows[rowIndex]['lengthController'].text = combination.length;
         _filledRows[rowIndex]['bodyTypeController'].text = combination.bodyType;
-        _filledRows[rowIndex]['size'] = combination.length;
         _filledRows[rowIndex]['length'] = combination.length;
         _filledRows[rowIndex]['bodyType'] = combination.bodyType;
         _filledRows[rowIndex]['lengthBodyCombination'] = combination.toMap();
 
+        // Set weight per unit if available
         if (combination.weightPerUnit != null) {
-          final double weightPerUnit = combination.weightPerUnit!;
-          final String weightUnit = combination.weightUnit ?? 'kg';
+          final weightPerUnit = combination.weightPerUnit!;
+          final weightUnit = combination.weightUnit ?? 'kg';
 
           _filledRows[rowIndex]['weightPerUnit'] = weightPerUnit;
           _filledRows[rowIndex]['weightUnit'] = weightUnit;
-          _filledRows[rowIndex]['weightController'].text =
-          '$weightPerUnit $weightUnit';
 
-          // Always use effective (customer-aware) rate when a rate is set
-          _filledRows[rowIndex]['rate'] = effectiveRate;
-          _filledRows[rowIndex]['rateController'].text =
-              effectiveRate.toStringAsFixed(2);
-
-          // Auto-switch to weight-based calculation when weight info exists
-          _filledRows[rowIndex]['calculationType'] = 'weight';
-        } else {
-          // No weight data — still apply the customer-aware rate
-          _filledRows[rowIndex]['rate'] = effectiveRate;
-          _filledRows[rowIndex]['rateController'].text =
-              effectiveRate.toStringAsFixed(2);
-          _filledRows[rowIndex]['calculationType'] = 'quantity';
+          // Set weight controller with weight per unit
+          _filledRows[rowIndex]['weightController'].text = '$weightPerUnit $weightUnit';
         }
       } else {
-        // No combination selected — use item-level customer price
-        _filledRows[rowIndex]['sizeController'].text = '';
-        _filledRows[rowIndex]['lengthController'].text = '';
-        _filledRows[rowIndex]['bodyTypeController'].text = '';
-        _filledRows[rowIndex]['size'] = '';
-        _filledRows[rowIndex]['length'] = '';
-        _filledRows[rowIndex]['bodyType'] = '';
-        _filledRows[rowIndex]['rate'] = customerPrice;
-        _filledRows[rowIndex]['rateController'].text =
-            customerPrice.toStringAsFixed(2);
-        _filledRows[rowIndex]['calculationType'] = 'quantity';
+        _filledRows[rowIndex]['lengthBodyCombination'] = null;
       }
 
-      // Default qty to 1 if not already set
-      if ((_filledRows[rowIndex]['qty'] ?? 0.0) == 0.0) {
+      // Clear previous weight info except if manual entry
+      if (!wasManualWeight) {
+        _filledRows[rowIndex]['weightPerUnit'] = null;
+        _filledRows[rowIndex]['weightUnit'] = 'kg';
+      }
+
+      if (combination != null) {
+        // If item has price per kg, use that instead of base price
+        if (salePricePerKg != null) {
+          _filledRows[rowIndex]['rate'] = salePricePerKg;
+          _filledRows[rowIndex]['rateController'].text = salePricePerKg.toStringAsFixed(2);
+
+          // Set calculation type to weight automatically if weight per unit exists
+          if (combination.weightPerUnit != null) {
+            _filledRows[rowIndex]['calculationType'] = 'weight';
+          }
+        } else {
+          _filledRows[rowIndex]['rate'] = customerPrice;
+          _filledRows[rowIndex]['rateController'].text = customerPrice.toStringAsFixed(2);
+        }
+      } else {
+        _filledRows[rowIndex]['rate'] = customerPrice;
+        _filledRows[rowIndex]['rateController'].text = customerPrice.toStringAsFixed(2);
+      }
+
+      // Restore manual weight if existed
+      if (wasManualWeight && manualWeightText != null) {
+        _filledRows[rowIndex]['weightController'].text = manualWeightText;
+        _filledRows[rowIndex]['calculationType'] = 'weight';
+      }
+
+      // Initialize quantity if not set
+      if (_filledRows[rowIndex]['qty'] == null || _filledRows[rowIndex]['qty'] == 0.0) {
         _filledRows[rowIndex]['qty'] = 1.0;
         _filledRows[rowIndex]['qtyController'].text = '1';
       }
 
+      // Calculate total for this row
       _calculateTotalForRow(rowIndex);
     });
   }
@@ -4169,199 +4391,227 @@ class _filledpageState extends State<filledpage> {
             onPressed: _isButtonPressed
                 ? null
                 : () async {
-              setState(() {
-                _isButtonPressed = true;
-              });
+              setState(() => _isButtonPressed = true);
 
               try {
-                // Validate reference number
-                // if (_referenceController.text.isEmpty) {
-                //   ScaffoldMessenger.of(context).showSnackBar(
-                //     SnackBar(
-                //       content: Text(
-                //         languageProvider.isEnglish
-                //             ? 'Please enter a reference number'
-                //             : 'براہ کرم رفرنس نمبر درج کریں',
-                //       ),
-                //     ),
-                //   );
-                //   setState(() => _isButtonPressed = false);
-                //   return;
-                // }
-                // In your save button onPressed method
-                if (_isAutoReference && (_selectedCustomerId != null && _selectedCustomerSerial != null)) {
-                  // Generate and use the auto reference number
+                // ── 1. Reference Number ──────────────────────────────
+                if (_isAutoReference &&
+                    _selectedCustomerId != null &&
+                    _selectedCustomerSerial != null) {
                   final autoRef = await _generateNextReferenceNumber(increment: true);
                   _referenceController.text = autoRef;
                 } else if (_referenceController.text.isEmpty) {
-                  // Manual mode but no reference entered
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        languageProvider.isEnglish
-                            ? 'Please enter a reference number'
-                            : 'براہ کرم رفرنس نمبر درج کریں',
-                      ),
-                    ),
+                  _showSnackBar(
+                    context,
+                    languageProvider.isEnglish
+                        ? 'Please enter a reference number'
+                        : 'براہ کرم رفرنس نمبر درج کریں',
                   );
                   setState(() => _isButtonPressed = false);
                   return;
                 }
 
-                // Validate customer selection
+                // ── 2. Customer ──────────────────────────────────────
                 if (_selectedCustomerId == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        languageProvider.isEnglish
-                            ? 'Please select a customer'
-                            : 'براہ کرم کسٹمر منتخب کریں',
-                      ),
-                    ),
+                  _showSnackBar(
+                    context,
+                    languageProvider.isEnglish
+                        ? 'Please select a customer'
+                        : 'براہ کرم کسٹمر منتخب کریں',
                   );
                   setState(() => _isButtonPressed = false);
                   return;
                 }
 
-                // Validate payment type
-                if (_paymentType == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        languageProvider.isEnglish
-                            ? 'Please select a payment type'
-                            : 'براہ کرم ادائیگی کی قسم منتخب کریں',
-                      ),
-                    ),
+                // ── 3. Payment type ──────────────────────────────────
+                if (_paymentType.isEmpty) {
+                  _showSnackBar(
+                    context,
+                    languageProvider.isEnglish
+                        ? 'Please select a payment type'
+                        : 'براہ کرم ادائیگی کی قسم منتخب کریں',
                   );
                   setState(() => _isButtonPressed = false);
                   return;
                 }
 
-                // Validate instant payment method
                 if (_paymentType == 'instant' && _instantPaymentMethod == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        languageProvider.isEnglish
-                            ? 'Please select an instant payment method'
-                            : 'براہ کرم فوری ادائیگی کا طریقہ منتخب کریں',
-                      ),
-                    ),
+                  _showSnackBar(
+                    context,
+                    languageProvider.isEnglish
+                        ? 'Please select an instant payment method'
+                        : 'براہ کرم فوری ادائیگی کا طریقہ منتخب کریں',
                   );
                   setState(() => _isButtonPressed = false);
                   return;
                 }
 
-                // // Validate item rates
-                // for (var row in _filledRows) {
-                //   if ((row['rate'] ?? 0.0) <= 0) {
-                //     ScaffoldMessenger.of(context).showSnackBar(
-                //       SnackBar(
-                //         content: Text(
-                //           languageProvider.isEnglish
-                //               ? 'Rate cannot be zero or less'
-                //               : 'ریٹ صفر یا اس سے کم نہیں ہو سکتا',
-                //         ),
-                //       ),
-                //     );
-                //     setState(() => _isButtonPressed = false);
-                //     return;
-                //   }
-                // }
-
-                // Validate discount amount
-                // Validate item rates (only for rows that have items)
+                // ── 4. Item rates ────────────────────────────────────
                 for (var row in _filledRows) {
                   final itemName = row['itemName'] ?? '';
-                  final rate = row['rate'] ?? 0.0;
-
-                  // Skip validation if the row is empty (no item name)
                   if (itemName.isEmpty) continue;
 
+                  final rate = (row['rate'] ?? 0.0) as double;
                   if (rate <= 0) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          languageProvider.isEnglish
-                              ? 'Rate cannot be zero or less'
-                              : 'ریٹ صفر یا اس سے کم نہیں ہو سکتا',
-                        ),
-                      ),
+                    _showSnackBar(
+                      context,
+                      languageProvider.isEnglish
+                          ? 'Rate cannot be zero or less for "$itemName"'
+                          : '"$itemName" کا ریٹ صفر یا اس سے کم نہیں ہو سکتا',
                     );
                     setState(() => _isButtonPressed = false);
                     return;
                   }
                 }
+
+                // ── 5. Discount ──────────────────────────────────────
                 final subtotal = _calculateSubtotal();
-                if (_discount >= subtotal) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        languageProvider.isEnglish
-                            ? 'Discount amount cannot be greater than or equal to the subtotal'
-                            : 'ڈسکاؤنٹ کی رقم سب ٹوٹل سے زیادہ یا اس کے برابر نہیں ہو سکتی',
-                      ),
-                    ),
+                if (_discount >= subtotal && subtotal > 0) {
+                  _showSnackBar(
+                    context,
+                    languageProvider.isEnglish
+                        ? 'Discount cannot be greater than or equal to subtotal'
+                        : 'ڈسکاؤنٹ سب ٹوٹل سے زیادہ یا برابر نہیں ہو سکتا',
                   );
                   setState(() => _isButtonPressed = false);
                   return;
                 }
 
-                // Check stock
-                List<Map<String, dynamic>> insufficientItems = [];
+                // ── 6. Batch stock validation ────────────────────────
+                List<String> batchStockWarnings = [];
+
                 for (var row in _filledRows) {
-                  String itemName = row['itemName'] ?? '';
+                  final itemName = row['itemName'] ?? '';
                   if (itemName.isEmpty) continue;
 
-                  Item? item = _items.firstWhere(
-                        (i) => i.itemName == itemName,
-                    orElse: () => Item(id: '', itemName: '',qtyOnHand: 0.0,avgCostPricePerKg: 0.0, avgSalePricePerKg: 0.0),
-                  );
+                  final batchId = row['batchId']?.toString();
+                  if (batchId == null || batchId.isEmpty) continue;
 
-                  if (item.id.isEmpty) continue;
+                  // Calculate requested quantity
+                  double requested = 0.0;
+                  if (row['calculationType'] == 'weight') {
+                    final totalWeight = (row['totalWeight'] ?? 0.0) as double;
+                    final weightUnit = row['weightUnit'] ?? 'kg';
+                    switch (weightUnit) {
+                      case 'g':
+                        requested = totalWeight / 1000;
+                        break;
+                      case 'ton':
+                        requested = totalWeight * 1000;
+                        break;
+                      case 'lb':
+                        requested = totalWeight * 0.453592;
+                        break;
+                      default:
+                        requested = totalWeight;
+                    }
+                  } else {
+                    requested = (row['qty'] ?? 0.0) as double;
+                  }
 
-                  double currentQty = item.qtyOnHand;
-                  double qty = row['qty'] ?? 0.0;
-                  double initialQty = row['initialQty'] ?? qty;
-                  double delta = widget.filled != null && widget.filled!['filledNumber'] != null
-                      ? (initialQty - qty)
-                      : -qty;
-                  double newQty = currentQty + delta;
+                  // Fetch fresh batch quantity from Firebase
+                  try {
+                    final batchSnap = await _db.child('batches').child(batchId).get();
+                    if (batchSnap.exists) {
+                      final batchData = Map<String, dynamic>.from(
+                          batchSnap.value as Map);
+                      final available =
+                      (batchData['quantity'] as num).toDouble();
 
-                  if (newQty < 0) {
-                    insufficientItems.add({'item': item, 'delta': delta});
+                      // For edit mode, add back the original quantity used
+                      double effectiveAvailable = available;
+                      if (widget.filled != null &&
+                          widget.filled!['filledNumber'] != null) {
+                        final initialWeight =
+                        (row['initialWeight'] ?? 0.0) as double;
+                        final initialQty =
+                        (row['initialQty'] ?? 0.0) as double;
+                        effectiveAvailable += row['calculationType'] == 'weight'
+                            ? initialWeight
+                            : initialQty;
+                      }
+
+                      if (requested > effectiveAvailable) {
+                        batchStockWarnings.add(
+                          '• $itemName (${row['batchNumber'] ?? batchId})\n'
+                              '  Requested: ${requested.toStringAsFixed(2)} kg  '
+                              '  Available: ${effectiveAvailable.toStringAsFixed(2)} kg',
+                        );
+                      }
+                    }
+                  } catch (e) {
+                    print('Error checking batch $batchId: $e');
                   }
                 }
 
-                if (insufficientItems.isNotEmpty) {
-                  bool proceed = await showDialog(
+                if (batchStockWarnings.isNotEmpty) {
+                  final proceed = await showDialog<bool>(
                     context: context,
                     builder: (context) => AlertDialog(
-                      title: Text(Provider.of<LanguageProvider>(context, listen: false).isEnglish
-                          ? 'Insufficient Stock'
-                          : 'اسٹاک ناکافی'),
-                      content: Text(
-                        Provider.of<LanguageProvider>(context, listen: false).isEnglish
-                            ? 'The following items will have negative stock. Do you want to proceed?'
-                            : 'مندرجہ ذیل اشیاء کا اسٹاک منفی ہو جائے گا۔ کیا آپ آگے بڑھنا چاہتے ہیں؟',
+                      title: Row(
+                        children: [
+                          Icon(Icons.warning_amber, color: Colors.orange),
+                          const SizedBox(width: 8),
+                          Text(
+                            languageProvider.isEnglish
+                                ? 'Batch Stock Warning'
+                                : 'بیچ اسٹاک وارننگ',
+                          ),
+                        ],
+                      ),
+                      content: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            languageProvider.isEnglish
+                                ? 'Insufficient stock in selected batches:'
+                                : 'منتخب بیچز میں اسٹاک ناکافی ہے:',
+                          ),
+                          const SizedBox(height: 12),
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Colors.orange[50],
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.orange.shade200),
+                            ),
+                            child: Text(
+                              batchStockWarnings.join('\n\n'),
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            languageProvider.isEnglish
+                                ? 'Do you want to proceed anyway?'
+                                : 'کیا آپ پھر بھی آگے بڑھنا چاہتے ہیں؟',
+                            style: TextStyle(color: Colors.grey[600]),
+                          ),
+                        ],
                       ),
                       actions: [
                         TextButton(
                           onPressed: () => Navigator.pop(context, false),
-                          child: Text(Provider.of<LanguageProvider>(context, listen: false).isEnglish
-                              ? 'Cancel'
-                              : 'منسوخ کریں'),
+                          child: Text(
+                            languageProvider.isEnglish ? 'Cancel' : 'منسوخ کریں',
+                          ),
                         ),
-                        TextButton(
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange,
+                          ),
                           onPressed: () => Navigator.pop(context, true),
-                          child: Text(Provider.of<LanguageProvider>(context, listen: false).isEnglish
-                              ? 'Proceed'
-                              : 'آگے بڑھیں'),
+                          child: Text(
+                            languageProvider.isEnglish
+                                ? 'Proceed Anyway'
+                                : 'پھر بھی جاری رکھیں',
+                            style: const TextStyle(color: Colors.white),
+                          ),
                         ),
                       ],
                     ),
-                  );
+                  ) ?? false;
 
                   if (!proceed) {
                     setState(() => _isButtonPressed = false);
@@ -4369,15 +4619,85 @@ class _filledpageState extends State<filledpage> {
                   }
                 }
 
+                // ── 7. Item-level stock check (existing logic) ───────
+                final List<Map<String, dynamic>> insufficientItems = [];
+
+                for (var row in _filledRows) {
+                  final itemName = row['itemName'] ?? '';
+                  if (itemName.isEmpty) continue;
+
+                  final item = _items.firstWhere(
+                        (i) => i.itemName == itemName,
+                    orElse: () => Item(
+                      id: '',
+                      itemName: '',
+                      qtyOnHand: 0.0,
+                      avgCostPricePerKg: 0.0, avgSalePricePerKg: 0.0,
+                    ),
+                  );
+                  if (item.id.isEmpty) continue;
+
+                  final double currentQty = item.qtyOnHand;
+                  final double qty = (row['qty'] ?? 0.0) as double;
+                  final double initialQty = (row['initialQty'] ?? qty) as double;
+                  final double delta =
+                  widget.filled != null && widget.filled!['filledNumber'] != null
+                      ? (initialQty - qty)
+                      : -qty;
+                  final double newQty = currentQty + delta;
+
+                  if (newQty < 0) {
+                    insufficientItems.add({'item': item, 'delta': delta});
+                  }
+                }
+
+                if (insufficientItems.isNotEmpty) {
+                  final proceed = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: Text(
+                        languageProvider.isEnglish
+                            ? 'Insufficient Stock'
+                            : 'اسٹاک ناکافی',
+                      ),
+                      content: Text(
+                        languageProvider.isEnglish
+                            ? 'Some items will have negative stock. Proceed?'
+                            : 'کچھ اشیاء کا اسٹاک منفی ہو جائے گا۔ جاری رکھیں؟',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context, false),
+                          child: Text(
+                            languageProvider.isEnglish ? 'Cancel' : 'منسوخ کریں',
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.pop(context, true),
+                          child: Text(
+                            languageProvider.isEnglish ? 'Proceed' : 'آگے بڑھیں',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ) ?? false;
+
+                  if (!proceed) {
+                    setState(() => _isButtonPressed = false);
+                    return;
+                  }
+                }
+
+                // ── 8. Build items list ──────────────────────────────
                 final grandTotal = _calculateGrandTotal();
-                final filledProvider = Provider.of<FilledProvider>(context, listen: false);
+                final filledProvider =
+                Provider.of<FilledProvider>(context, listen: false);
 
-                // Generate filled number for new fills
-                String filledNumber = widget.filled?['filledNumber']?.toString() ??
-                    (await filledProvider.getNextFilledNumber()).toString();
+                final String filledNumber =
+                    widget.filled?['filledNumber']?.toString() ??
+                        (await filledProvider.getNextFilledNumber()).toString();
 
-                // Prepare items with ALL details
-                final items = _filledRows.map((row) {
+                final List<Map<String, dynamic>> items = _filledRows.map((row) {
                   return {
                     'itemName': row['itemName'] ?? '',
                     'rate': row['rate'] ?? 0.0,
@@ -4391,14 +4711,19 @@ class _filledpageState extends State<filledpage> {
                     'weightPerUnit': row['weightPerUnit'],
                     'weightUnit': row['weightUnit'] ?? 'kg',
                     'totalWeight': row['totalWeight'],
-                    'initialQty': row['initialQty'] ?? row['qty'] ?? 0.0, // For stock tracking
-                    'initialWeight': row['totalWeight'] ?? 0.0, // ADD THIS LINE
-                    'lengthBodyCombination': row['lengthBodyCombination'], // Store combination if exists
+                    'initialQty': row['initialQty'] ?? row['qty'] ?? 0.0,
+                    'initialWeight': row['totalWeight'] ?? 0.0,
+                    // Batch fields
+                    'batchId': row['batchId'],
+                    'batchNumber': row['batchNumber'],
+                    'batchPurchasePrice': row['batchPurchasePrice'],
+                    'availableBatchQty': row['availableBatchQty'],
+                    'lengthBodyCombination': row['lengthBodyCombination'],
                   };
                 }).toList();
 
-                // Prepare date
-                final createdAt = _dateController.text.isNotEmpty
+                // ── 9. Prepare date ──────────────────────────────────
+                final String createdAt = _dateController.text.isNotEmpty
                     ? DateTime(
                   DateTime.parse(_dateController.text).year,
                   DateTime.parse(_dateController.text).month,
@@ -4409,14 +4734,15 @@ class _filledpageState extends State<filledpage> {
                 ).toIso8601String()
                     : DateTime.now().toIso8601String();
 
-                // Always save as new fill when coming from quotation
-                if (widget.filled?['isFromQuotation'] ?? false) {
-                  // Only increment when saving a new invoice
-                  if (_isAutoReference && (_selectedCustomerId != null && _selectedCustomerSerial != null)) {
-                    final autoRef = await _generateCustomerSerialReference(increment: true);
+                // ── 10. Save / Update ────────────────────────────────
+                if (widget.filled?['isFromQuotation'] == true) {
+                  if (_isAutoReference &&
+                      _selectedCustomerId != null &&
+                      _selectedCustomerSerial != null) {
+                    final autoRef =
+                    await _generateCustomerSerialReference(increment: true);
                     _referenceController.text = autoRef;
                   }
-
                   await filledProvider.saveFilled(
                     filledId: filledNumber,
                     filledNumber: filledNumber,
@@ -4434,9 +4760,8 @@ class _filledpageState extends State<filledpage> {
                     createdAt: createdAt,
                     items: items,
                   );
-                }
-                // Update existing fill if it has a filledNumber
-                else if (widget.filled != null && widget.filled!['filledNumber'] != null) {
+                } else if (widget.filled != null &&
+                    widget.filled!['filledNumber'] != null) {
                   await filledProvider.updateFilled(
                     filledId: filledNumber,
                     filledNumber: filledNumber,
@@ -4454,9 +4779,7 @@ class _filledpageState extends State<filledpage> {
                     items: items,
                     createdAt: createdAt,
                   );
-                }
-                // Otherwise save as new fill
-                else {
+                } else {
                   await filledProvider.saveFilled(
                     filledId: filledNumber,
                     filledNumber: filledNumber,
@@ -4476,10 +4799,10 @@ class _filledpageState extends State<filledpage> {
                   );
                 }
 
-                // Update stock
-                _updateQtyOnHand(_filledRows);
+                // ── 11. Deduct stock (batch-aware) ───────────────────
+                await _updateQtyOnHand(_filledRows);
 
-                // Update state
+                // ── 12. Update local state ───────────────────────────
                 setState(() {
                   _currentFilled = {
                     'id': filledNumber,
@@ -4495,29 +4818,23 @@ class _filledpageState extends State<filledpage> {
                   _isSaved = true;
                 });
 
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      widget.filled == null || widget.filled!['isFromQuotation'] ?? false
-                          ? (languageProvider.isEnglish
-                          ? 'Invoice saved successfully'
-                          : 'انوائس کامیابی سے محفوظ ہوگئی')
-                          : (languageProvider.isEnglish
-                          ? 'Iilled updated successfully'
-                          : 'انوائس کامیابی سے تبدیل ہوگئی'),
-                    ),
-                  ),
+                _showSnackBar(
+                  context,
+                  widget.filled == null || widget.filled?['isFromQuotation'] == true
+                      ? (languageProvider.isEnglish
+                      ? 'Invoice saved successfully'
+                      : 'انوائس کامیابی سے محفوظ ہوگئی')
+                      : (languageProvider.isEnglish
+                      ? 'Invoice updated successfully'
+                      : 'انوائس کامیابی سے تبدیل ہوگئی'),
                 );
               } catch (e) {
                 print('Error saving invoice: $e');
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      languageProvider.isEnglish
-                          ? 'Failed to save invoice: ${e.toString()}'
-                          : 'انوائس محفوظ کرنے میں ناکام: ${e.toString()}',
-                    ),
-                  ),
+                _showSnackBar(
+                  context,
+                  languageProvider.isEnglish
+                      ? 'Failed to save invoice: ${e.toString()}'
+                      : 'انوائس محفوظ کرنے میں ناکام: ${e.toString()}',
                 );
               } finally {
                 setState(() => _isButtonPressed = false);
@@ -4531,7 +4848,7 @@ class _filledpageState extends State<filledpage> {
               ),
             ),
             child: Text(
-              widget.filled == null || widget.filled?['isFromQuotation'] ?? false
+              widget.filled == null || widget.filled?['isFromQuotation'] == true
                   ? (languageProvider.isEnglish ? 'Save Invoice' : 'انوائس محفوظ کریں')
                   : (languageProvider.isEnglish ? 'Update Invoice' : 'انوائس کو اپ ڈیٹ کریں'),
               style: const TextStyle(
@@ -4731,6 +5048,7 @@ class CustomAutocomplete extends StatelessWidget {
               onSelected(Item(
                 id: 'manual_${DateTime.now().millisecondsSinceEpoch}',
                 itemName: value,
+
                 qtyOnHand: 0, avgCostPricePerKg: 0.0, avgSalePricePerKg: 0.0,
               ));
             }
@@ -4786,19 +5104,151 @@ class CustomAutocomplete extends StatelessWidget {
         );
       },
       onSelected: (Item selection) {
-        // Use customer price if customer is selected, otherwise use sale price
-        final selectedPrice = selectedCustomerId != null
-            ? selection.getPriceForCustomer(selectedCustomerId)
-            : selection.avgSalePricePerKg;
+        // Check if item has length-body combinations
+        if (selection.lengthBodyCombinations != null &&
+            selection.lengthBodyCombinations!.isNotEmpty) {
+          // Store the selection temporarily and show combination dialog
+          // You'll need to implement a way to get the current row index
+          // For now, we'll just use the item without combinations
+          final selectedPrice = selectedCustomerId != null
+              ? selection.getPriceForCustomer(selectedCustomerId)
+              : selection.avgSalePricePerKg;
 
-        controller.text = selection.itemName;
-        onSelected(selection.copyWith(
-          avgCostPricePerKg: selectedPrice,
-          avgSalePricePerKg: selectedPrice,
-        ));
+          // Parse BOM name to get just the size
+          final parsedBOM = _parseBOMName(selection.itemName);
+          controller.text = parsedBOM['size'] ?? selection.itemName;
+
+          onSelected(selection.copyWith(
+            avgCostPricePerKg: selectedPrice,
+            avgSalePricePerKg: selectedPrice,
+          ));
+        } else {
+          // Use customer price if customer is selected, otherwise use sale price
+          final selectedPrice = selectedCustomerId != null
+              ? selection.getPriceForCustomer(selectedCustomerId)
+              : selection.avgSalePricePerKg;
+
+          // Parse BOM name to get just the size
+          final parsedBOM = _parseBOMName(selection.itemName);
+          controller.text = parsedBOM['size'] ?? selection.itemName;
+
+          onSelected(selection.copyWith(
+            avgCostPricePerKg: selectedPrice,
+            avgSalePricePerKg: selectedPrice,
+          ));
+        }
       },
     );
   }
+
+  void _showLengthCombinationDialog(Item item, BuildContext context) {
+    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    bool isProcessing = false;
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text(
+                languageProvider.isEnglish ? 'Select Length-Body Combination' : 'لمبائی-جسم کا مجموعہ منتخب کریں',
+              ),
+              content: Container(
+                width: double.maxFinite,
+                constraints: BoxConstraints(maxHeight: 400),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: item.lengthBodyCombinations!.length,
+                  itemBuilder: (context, index) {
+                    final combination = item.lengthBodyCombinations![index];
+                    return Card(
+                      margin: EdgeInsets.symmetric(vertical: 4),
+                      child: ListTile(
+                        title: Text('${item.itemName} (${combination.length} - ${combination.bodyType})'),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (combination.lengthDecimal.isNotEmpty)
+                              Text(
+                                'Decimal: ${combination.lengthDecimal}',
+                                style: TextStyle(fontSize: 12, color: Colors.grey),
+                              ),
+                            if (combination.weightPerUnit != null)
+                              Text(
+                                'Weight/Unit: ${combination.weightPerUnit} ${combination.weightUnit}',
+                                style: TextStyle(fontSize: 12, color: Colors.blue),
+                              ),
+                            if (combination.costPricePerKg != null && combination.salePricePerKg != null)
+                              Text(
+                                'Price/Kg: ${combination.salePricePerKg!.toStringAsFixed(2)} PKR',
+                                style: TextStyle(fontSize: 12, color: Colors.green),
+                              ),
+                          ],
+                        ),
+                        trailing: Icon(Icons.arrow_forward),
+                        onTap: () {
+                          if (isProcessing) return;
+                          setState(() { isProcessing = true; });
+                          Navigator.pop(context);
+                          Future.delayed(Duration(milliseconds: 100), () {
+                            // This method should be implemented in the parent widget
+                            // You'll need to pass the row index somehow
+                            // For now, we'll call onSelected with null combination
+                            final selectedPrice = selectedCustomerId != null
+                                ? item.getPriceForCustomer(selectedCustomerId)
+                                : item.avgSalePricePerKg;
+
+                            // Parse BOM name to get just the size
+                            final parsedBOM = _parseBOMName(item.itemName);
+                            controller.text = parsedBOM['size'] ?? item.itemName;
+
+                            onSelected(item.copyWith(
+                              avgCostPricePerKg: selectedPrice,
+                              avgSalePricePerKg: selectedPrice,
+                            ));
+                          });
+                        },
+                      ),
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    if (isProcessing) return;
+                    setState(() { isProcessing = true; });
+                    Navigator.pop(context);
+                    Future.delayed(Duration(milliseconds: 100), () {
+                      final selectedPrice = selectedCustomerId != null
+                          ? item.getPriceForCustomer(selectedCustomerId)
+                          : item.avgSalePricePerKg;
+
+                      // Parse BOM name to get just the size
+                      final parsedBOM = _parseBOMName(item.itemName);
+                      controller.text = parsedBOM['size'] ?? item.itemName;
+
+                      onSelected(item.copyWith(
+                        avgCostPricePerKg: selectedPrice,
+                        avgSalePricePerKg: selectedPrice,
+                      ));
+                    });
+                  },
+                  child: Text(languageProvider.isEnglish ? 'Skip' : 'چھوڑ دیں'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
 
   void _showItemSearchDialog(BuildContext context) {
     String searchQuery = '';
@@ -4958,12 +5408,35 @@ class CustomAutocomplete extends StatelessWidget {
                                   ),
                                 ),
                               ),
-                              title: Text(
-                                item.itemName,
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 14,
-                                ),
+                              title: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (item.itemName.contains('|'))
+                                    Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        // Show the full BOM name
+                                        Text(
+                                          item.itemName,
+                                          style: TextStyle(fontWeight: FontWeight.w500),
+                                        ),
+                                        // Parse and show the individual parts in a smaller font
+                                        Text(
+                                          _formatBOMName(item.itemName),
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.grey[600],
+                                            fontStyle: FontStyle.italic,
+                                          ),
+                                        ),
+                                      ],
+                                    )
+                                  else
+                                    Text(
+                                      item.itemName,
+                                      style: TextStyle(fontWeight: FontWeight.w500),
+                                    ),
+                                ],
                               ),
                               subtitle: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -5018,15 +5491,28 @@ class CustomAutocomplete extends StatelessWidget {
 
                                   // Then trigger the selection after a small delay
                                   Future.delayed(Duration(milliseconds: 100), () {
-                                    final selectedPrice = selectedCustomerId != null
-                                        ? item.getPriceForCustomer(selectedCustomerId)
-                                        : item.avgSalePricePerKg;
+                                    // Check if item has length-body combinations
+                                    if (item.lengthBodyCombinations != null &&
+                                        item.lengthBodyCombinations!.isNotEmpty) {
+                                      // Show combination dialog
+                                      _showLengthCombinationDialog(item, context);
+                                    } else {
+                                      final selectedPrice = selectedCustomerId != null
+                                          ? item.getPriceForCustomer(selectedCustomerId)
+                                          : item.avgSalePricePerKg;
 
-                                    controller.text = item.itemName;
-                                    onSelected(item.copyWith(
-                                      avgCostPricePerKg: selectedPrice,
-                                      avgSalePricePerKg: selectedPrice,
-                                    ));
+                                      // Parse BOM name to get just the size
+                                      final parsedBOM = _parseBOMName(item.itemName);
+                                      controller.text = parsedBOM['size'] ?? item.itemName;
+
+                                      // Find the row index where this item should be added
+                                      // This assumes you have a way to get the current row index
+                                      // You might need to pass the row index to this method
+                                      onSelected(item.copyWith(
+                                        avgCostPricePerKg: selectedPrice,
+                                        avgSalePricePerKg: selectedPrice,
+                                      ));
+                                    }
                                   });
                                 },
                                 child: Row(
@@ -5040,19 +5526,29 @@ class CustomAutocomplete extends StatelessWidget {
                               ),
                               onTap: () {
                                 // Alternative: tap anywhere on the tile to select
-                                Navigator.pop(context);
+                                if (item.lengthBodyCombinations != null &&
+                                    item.lengthBodyCombinations!.isNotEmpty) {
+                                  Navigator.pop(context);
+                                  Future.delayed(Duration(milliseconds: 100), () {
+                                    _showLengthCombinationDialog(item, context);
+                                  });
+                                } else {
+                                  Navigator.pop(context);
+                                  Future.delayed(Duration(milliseconds: 100), () {
+                                    final selectedPrice = selectedCustomerId != null
+                                        ? item.getPriceForCustomer(selectedCustomerId)
+                                        : item.avgSalePricePerKg;
 
-                                Future.delayed(Duration(milliseconds: 100), () {
-                                  final selectedPrice = selectedCustomerId != null
-                                      ? item.getPriceForCustomer(selectedCustomerId)
-                                      : item.avgSalePricePerKg;
+                                    // Parse BOM name to get just the size
+                                    final parsedBOM = _parseBOMName(item.itemName);
+                                    controller.text = parsedBOM['size'] ?? item.itemName;
 
-                                  controller.text = item.itemName;
-                                  onSelected(item.copyWith(
-                                    avgCostPricePerKg: selectedPrice,
-                                    avgSalePricePerKg: selectedPrice,
-                                  ));
-                                });
+                                    onSelected(item.copyWith(
+                                      avgCostPricePerKg: selectedPrice,
+                                      avgSalePricePerKg: selectedPrice,
+                                    ));
+                                  });
+                                }
                               },
                             ),
                           );
@@ -5067,6 +5563,46 @@ class CustomAutocomplete extends StatelessWidget {
         );
       },
     );
+  }
+
+// Add this helper method to the CustomAutocomplete class
+  String _formatBOMName(String bomName) {
+    if (!bomName.contains('|')) return bomName;
+
+    final parts = bomName.split('|');
+    if (parts.length >= 3) {
+      return 'Size: ${parts[0].trim()} | Length: ${parts[1].trim()} | Body: ${parts[2].trim()}';
+    }
+    return bomName;
+  }
+
+// Add this method to parse BOM names
+  Map<String, String> _parseBOMName(String bomName) {
+    Map<String, String> result = {
+      'size': '',
+      'length': '',
+      'bodyType': '',
+      'fullName': bomName
+    };
+
+    if (bomName.contains('|')) {
+      final parts = bomName.split('|').map((part) => part.trim()).toList();
+
+      if (parts.length >= 3) {
+        result['size'] = parts[0];
+        result['length'] = parts[1];
+        result['bodyType'] = parts[2];
+      } else if (parts.length == 2) {
+        result['size'] = parts[0];
+        result['length'] = parts[1];
+      } else if (parts.length == 1) {
+        result['size'] = parts[0];
+      }
+    } else {
+      result['size'] = bomName;
+    }
+
+    return result;
   }
 
   void _showImagePreview(BuildContext context, String base64Image) {

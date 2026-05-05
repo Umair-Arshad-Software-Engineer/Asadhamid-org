@@ -19,6 +19,7 @@ import '../Provider/lanprovider.dart';
 import '../Purchase/wastage recordpage.dart';
 import 'AddItems.dart';
 import 'editphysicalqty.dart';
+import '../Models/batch_model.dart';
 
 class ItemsListPage extends StatefulWidget {
   @override
@@ -42,6 +43,11 @@ class _ItemsListPageState extends State<ItemsListPage> {
   final Color _cardColor = Colors.white;
   final Color _textColor = Colors.grey[800]!;
   Map<String, double> _expandedCombinations = {};
+
+  // ── NEW: Batch data ──────────────────────────────────────────────────────
+  Map<String, List<Batch>> _batchesByItemName = {};
+  Map<String, bool> _expandedBatches = {};
+  bool _isLoadingBatches = false;
 
   // ── Stock helpers ──────────────────────────────────────────────────────────
   Color _stockColor(double qty, double threshold) {
@@ -83,7 +89,198 @@ class _ItemsListPageState extends State<ItemsListPage> {
     super.initState();
     fetchItems();
     _fetchCustomerNames();
+    _fetchAllBatches();
     _searchController.addListener(_searchItems);
+  }
+
+  // ── NEW: Fetch all batches and group by item name ────────────────────────
+  Future<void> _fetchAllBatches() async {
+    if (mounted) setState(() => _isLoadingBatches = true);
+
+    final snap = await FirebaseDatabase.instance.ref('batches').get();
+    final Map<String, List<Batch>> grouped = {};
+
+    if (snap.exists) {
+      final data = snap.value as Map<dynamic, dynamic>;
+      data.forEach((key, value) {
+        final batch = Batch.fromMap(Map<String, dynamic>.from(value as Map), key.toString());
+        // Only include active batches with remaining quantity > 0
+        if (batch.isActive && batch.remainingQty > 0) {
+          grouped.putIfAbsent(batch.itemName, () => []).add(batch);
+        }
+      });
+
+      // Sort each batch list by purchase date (newest first)
+      grouped.forEach((key, list) {
+        list.sort((a, b) => b.purchaseDate.compareTo(a.purchaseDate));
+      });
+    }
+
+    if (mounted) {
+      setState(() {
+        _batchesByItemName = grouped;
+        _isLoadingBatches = false;
+      });
+    }
+  }
+
+  // ── NEW: Get total batch quantity for an item ────────────────────────────
+  double _getTotalBatchQty(String itemName) {
+    final batches = _batchesByItemName[itemName];
+    if (batches == null) return 0.0;
+    return batches.fold(0.0, (sum, b) => sum + b.remainingQty);
+  }
+
+  // ── NEW: Get batch count for an item ─────────────────────────────────────
+  int _getBatchCount(String itemName) {
+    return _batchesByItemName[itemName]?.length ?? 0;
+  }
+
+  // ── NEW: Toggle batch expansion for an item ──────────────────────────────
+  void _toggleBatchExpansion(String itemName) {
+    setState(() {
+      _expandedBatches[itemName] = !(_expandedBatches[itemName] ?? false);
+    });
+  }
+
+  // ── NEW: Show batch details dialog ───────────────────────────────────────
+  void _showBatchDetails(Batch batch) {
+    final fmt = DateFormat('yyyy-MM-dd HH:mm');
+    final used = batch.usedQty;
+    final pctUsed = batch.quantity > 0 ? used / batch.quantity : 0.0;
+    final remainingValue = batch.remainingQty * batch.purchasePrice;
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: Row(
+          children: [
+            Icon(Icons.inventory_2, color: _primaryColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                batch.batchNumber,
+                style: const TextStyle(fontSize: 16),
+              ),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Item info
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: _primaryColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: _primaryColor.withOpacity(0.4)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        batch.itemName,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: _primaryColor,
+                          fontSize: 15,
+                        ),
+                      ),
+                      if (batch.length.isNotEmpty || batch.bodyType.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Row(
+                            children: [
+                              if (batch.length.isNotEmpty) ...[
+                                const Icon(Icons.straighten, size: 14, color: Colors.grey),
+                                const SizedBox(width: 4),
+                                Text(batch.length, style: const TextStyle(fontSize: 13, color: Colors.grey)),
+                                const SizedBox(width: 12),
+                              ],
+                              if (batch.bodyType.isNotEmpty) ...[
+                                const Icon(Icons.category, size: 14, color: Colors.grey),
+                                const SizedBox(width: 4),
+                                Text(batch.bodyType, style: const TextStyle(fontSize: 13, color: Colors.grey)),
+                              ],
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                _buildBatchDetailRow('Original Qty', '${batch.quantity.toStringAsFixed(2)} kg'),
+                _buildBatchDetailRow('Remaining Qty', '${batch.remainingQty.toStringAsFixed(2)} kg',
+                    color: batch.remainingQty <= 0 ? Colors.red : batch.remainingQty < 100 ? Colors.orange : Colors.green),
+                _buildBatchDetailRow('Used Qty', '${used.toStringAsFixed(2)} kg', color: Colors.blueGrey),
+                const SizedBox(height: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: pctUsed,
+                    minHeight: 8,
+                    backgroundColor: Colors.green[100],
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.green[700]!),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    '${(pctUsed * 100).toStringAsFixed(1)}% consumed',
+                    style: const TextStyle(fontSize: 11, color: Colors.grey),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Divider(),
+                const SizedBox(height: 8),
+
+                _buildBatchDetailRow('Rate (Cost/kg)', '${batch.purchasePrice.toStringAsFixed(2)} PKR'),
+                _buildBatchDetailRow('Remaining Value', '${remainingValue.toStringAsFixed(2)} PKR'),
+                _buildBatchDetailRow('Vendor', batch.vendorName),
+                _buildBatchDetailRow('Purchase Date', fmt.format(batch.purchaseDate)),
+                if (batch.purchaseId.isNotEmpty)
+                  _buildBatchDetailRow('Purchase ID', batch.purchaseId),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBatchDetailRow(String label, String value, {Color? color}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 120,
+            child: Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          ),
+          const Text(': ', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(fontSize: 13, color: color),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> fetchItems() async {
@@ -215,6 +412,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
               '1Kg Profit',
               'Profit %',
               'Qty On Hand',
+              'Batch Qty',
+              'Batches',
               'Vendor',
             ],
             cellAlignment: pw.Alignment.centerLeft,
@@ -258,6 +457,9 @@ class _ItemsListPageState extends State<ItemsListPage> {
               double profitPercentage =
               avgCost > 0 ? (profitMargin / avgCost) * 100 : 0.0;
 
+              final batchQty = _getTotalBatchQty(item['itemName']?.toString() ?? '');
+              final batchCount = _getBatchCount(item['itemName']?.toString() ?? '');
+
               return [
                 item['itemName'].toString(),
                 item['description']?.toString() ?? 'N/A',
@@ -267,6 +469,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 profitMargin.toStringAsFixed(2),
                 profitPercentage.toStringAsFixed(1) + '%',
                 item['qtyOnHand']?.toString() ?? '0',
+                batchQty.toStringAsFixed(2),
+                batchCount.toString(),
                 item['vendor']?.toString() ?? 'N/A',
               ];
             }).toList(),
@@ -319,7 +523,10 @@ class _ItemsListPageState extends State<ItemsListPage> {
       MaterialPageRoute(
         builder: (context) => RegisterItemPage(itemData: item),
       ),
-    ).then((_) => fetchItems());
+    ).then((_) {
+      fetchItems();
+      _fetchAllBatches();
+    });
   }
 
   void _confirmDelete(String key) {
@@ -508,6 +715,186 @@ class _ItemsListPageState extends State<ItemsListPage> {
           ),
         ],
       ],
+    );
+  }
+
+  // ── NEW: Batch section for an item (displayed in center panel) ───────────
+  Widget _buildBatchSection(String itemName) {
+    final batches = _batchesByItemName[itemName];
+    if (batches == null || batches.isEmpty) {
+      return SizedBox();
+    }
+
+    final isExpanded = _expandedBatches[itemName] ?? false;
+    final totalBatchQty = batches.fold(0.0, (sum, b) => sum + b.remainingQty);
+    final batchCount = batches.length;
+
+    return Card(
+      margin: EdgeInsets.symmetric(vertical: 8),
+      elevation: 2,
+      child: Column(
+        children: [
+          ListTile(
+            leading: Container(
+              padding: EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.blue[50],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.inventory, color: Colors.blue[700], size: 20),
+            ),
+            title: Text(
+              'Batch Stock',
+              style: TextStyle(fontWeight: FontWeight.bold, color: _primaryColor),
+            ),
+            subtitle: Text(
+              '$batchCount batch(es) | Total: ${totalBatchQty.toStringAsFixed(2)} kg',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.blue[50],
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    totalBatchQty.toStringAsFixed(2),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue[700],
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: Icon(isExpanded ? Icons.expand_less : Icons.expand_more),
+                  onPressed: () => _toggleBatchExpansion(itemName),
+                ),
+              ],
+            ),
+          ),
+          if (isExpanded)
+            Padding(
+              padding: EdgeInsets.all(12),
+              child: Column(
+                children: batches.map((batch) {
+                  return _buildBatchTile(batch);
+                }).toList(),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ── NEW: Individual batch tile ───────────────────────────────────────────
+  Widget _buildBatchTile(Batch batch) {
+    final remaining = batch.remainingQty;
+    final total = batch.quantity;
+    final pctRemain = total > 0 ? remaining / total : 0.0;
+
+    Color statusColor = Colors.green;
+    if (remaining <= 0) statusColor = Colors.grey;
+    else if (remaining < 100) statusColor = Colors.orange;
+
+    return Card(
+      margin: EdgeInsets.only(bottom: 8),
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      child: InkWell(
+        onTap: () => _showBatchDetails(batch),
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: EdgeInsets.all(10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          batch.batchNumber,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            color: _primaryColor,
+                          ),
+                        ),
+                        if (batch.length.isNotEmpty || batch.bodyType.isNotEmpty)
+                          Padding(
+                            padding: EdgeInsets.only(top: 2),
+                            child: Row(
+                              children: [
+                                if (batch.length.isNotEmpty)
+                                  Text(
+                                    batch.length,
+                                    style: TextStyle(fontSize: 10, color: Colors.grey[600]),
+                                  ),
+                                if (batch.length.isNotEmpty && batch.bodyType.isNotEmpty)
+                                  SizedBox(width: 6),
+                                if (batch.bodyType.isNotEmpty)
+                                  Text(
+                                    batch.bodyType,
+                                    style: TextStyle(fontSize: 10, color: Colors.grey[600]),
+                                  ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: statusColor.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${remaining.toStringAsFixed(2)} kg',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: statusColor,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 6),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: pctRemain,
+                  minHeight: 4,
+                  backgroundColor: Colors.grey[200],
+                  valueColor: AlwaysStoppedAnimation<Color>(statusColor),
+                ),
+              ),
+              SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Rate: ${batch.purchasePrice.toStringAsFixed(2)} PKR/kg',
+                    style: TextStyle(fontSize: 10, color: Colors.grey[600]),
+                  ),
+                  Text(
+                    DateFormat('dd MMM yy').format(batch.purchaseDate),
+                    style: TextStyle(fontSize: 10, color: Colors.grey[500]),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1163,8 +1550,8 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           if (diff != 0)
                             Text(
                               diff > 0
-                                  ? "↓ ${diff.toStringAsFixed(2)} less than default"
-                                  : "↑ ${(-diff).toStringAsFixed(2)} more than default",
+                                  ? "↓ ${diff.toStringAsFixed(2)} less"
+                                  : "↑ ${(-diff).toStringAsFixed(2)} more",
                               style: TextStyle(
                                 fontSize: 10,
                                 color: diff > 0
@@ -1423,6 +1810,10 @@ class _ItemsListPageState extends State<ItemsListPage> {
       }
     }
 
+    // Also get batch total
+    final batchTotal = _getTotalBatchQty(_selectedItem!['itemName']?.toString() ?? '');
+    final batchCount = _getBatchCount(_selectedItem!['itemName']?.toString() ?? '');
+
     Color overallColor = Colors.green;
     if (outOfStock > 0) overallColor = Colors.red;
     else if (lowStock > 0) overallColor = Colors.orange;
@@ -1470,6 +1861,37 @@ class _ItemsListPageState extends State<ItemsListPage> {
               'across ${combos.length} combination(s)',
               style: TextStyle(fontSize: 11, color: Colors.grey[600]),
             ),
+            // ── Batch summary ──
+            if (batchCount > 0) ...[
+              SizedBox(height: 8),
+              Divider(height: 1),
+              SizedBox(height: 8),
+              Row(
+                children: [
+                  Container(
+                    padding: EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Icon(Icons.inventory, size: 14, color: Colors.blue),
+                  ),
+                  SizedBox(width: 6),
+                  Text(
+                    'Batch Stock: ${batchTotal.toStringAsFixed(2)} kg',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      color: Colors.blue[700],
+                    ),
+                  ),
+                ],
+              ),
+              Text(
+                '$batchCount active batch(es)',
+                style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+              ),
+            ],
             SizedBox(height: 8),
             // Mini breakdown bars
             if (inStock > 0)
@@ -1538,6 +1960,10 @@ class _ItemsListPageState extends State<ItemsListPage> {
             },
             icon: Icon(Icons.history, color: Colors.white),
           ),
+          IconButton(
+            onPressed: _fetchAllBatches,
+            icon: Icon(Icons.refresh, color: Colors.white),
+          ),
         ],
         flexibleSpace: Container(
           decoration: BoxDecoration(
@@ -1593,11 +2019,14 @@ class _ItemsListPageState extends State<ItemsListPage> {
                         itemCount: _filteredItems.length,
                         itemBuilder: (context, index) {
                           final item = _filteredItems[index];
+                          final itemName = item['itemName']?.toString() ?? '';
                           final combosCount =
                           item['lengthBodyCombinations'] != null
                               ? (item['lengthBodyCombinations'] as List)
                               .length
                               : 0;
+                          final batchCount = _getBatchCount(itemName);
+                          final batchQty = _getTotalBatchQty(itemName);
 
                           // Compute stock alert colour for left border
                           Color borderColor = Colors.grey[200]!;
@@ -1638,54 +2067,123 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                   color: borderColor, width: 1.5),
                             ),
                             child: ListTile(
-                              leading: Container(
-                                padding: EdgeInsets.all(4),
-                                decoration: BoxDecoration(
-                                  color: combosCount > 0
-                                      ? Colors.green[50]
-                                      : Colors.grey[50],
-                                  borderRadius:
-                                  BorderRadius.circular(6),
-                                  border: Border.all(
-                                    color: combosCount > 0
-                                        ? Colors.green[100]!
-                                        : Colors.grey[200]!,
-                                  ),
-                                ),
-                                child: Text(
-                                  "$combosCount",
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    color: combosCount > 0
-                                        ? Colors.green[700]
-                                        : Colors.grey[600],
-                                  ),
+                              minVerticalPadding: 8,
+                              contentPadding: EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 6),
+                              leading: SizedBox(
+                                width: 35,
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Container(
+                                      padding: EdgeInsets.symmetric(
+                                          horizontal: 4, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: combosCount > 0
+                                            ? Colors.green[50]
+                                            : Colors.grey[50],
+                                        borderRadius:
+                                        BorderRadius.circular(6),
+                                        border: Border.all(
+                                          color: combosCount > 0
+                                              ? Colors.green[100]!
+                                              : Colors.grey[200]!,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        "$combosCount",
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color: combosCount > 0
+                                              ? Colors.green[700]
+                                              : Colors.grey[600],
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ),
+                                    if (batchCount > 0)
+                                      Padding(
+                                        padding: EdgeInsets.only(top: 2),
+                                        child: Container(
+                                          padding: EdgeInsets.symmetric(
+                                              horizontal: 3, vertical: 1),
+                                          decoration: BoxDecoration(
+                                            color: Colors.blue[50],
+                                            borderRadius: BorderRadius.circular(4),
+                                            border: Border.all(color: Colors.blue[100]!),
+                                          ),
+                                          child: Text(
+                                            "$batchCount",
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.blue[700],
+                                              fontSize: 9,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
                                 ),
                               ),
-                              title: Text(item['itemName'],
-                                  style: TextStyle(
-                                      color: _textColor,
-                                      fontWeight: FontWeight.bold)),
+                              title: Text(
+                                item['itemName'] ?? '',
+                                style: TextStyle(
+                                    color: _textColor,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                               subtitle: Column(
-                                crossAxisAlignment:
-                                CrossAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
                                 children: [
                                   Text(
                                     "Qty: ${item['qtyOnHand'] ?? 0}",
                                     style: TextStyle(
-                                        color: _textColor.withOpacity(0.7)),
+                                        color: _textColor.withOpacity(0.7),
+                                        fontSize: 11),
                                   ),
-                                  SizedBox(height: 4),
-                                  // ── Stock chips ──────────────────────
-                                  _buildItemStockChips(item),
+                                  // const SizedBox(height: 2),
+                                  // Stock chips (combinations)
+                                  // _buildCompactStockChips(item),
+                                  // Batch chip
+                                  // if (batchCount > 0)
+                                  //   Padding(
+                                  //     padding: const EdgeInsets.only(top: 2),
+                                  //     child: Container(
+                                  //       padding: const EdgeInsets.symmetric(
+                                  //           horizontal: 4, vertical: 1),
+                                  //       decoration: BoxDecoration(
+                                  //         color: Colors.blue.withOpacity(0.1),
+                                  //         borderRadius: BorderRadius.circular(4),
+                                  //       ),
+                                  //       child: Row(
+                                  //         mainAxisSize: MainAxisSize.min,
+                                  //         children: [
+                                  //           Icon(Icons.inventory,
+                                  //               size: 8, color: Colors.blue),
+                                  //           const SizedBox(width: 2),
+                                  //           Text(
+                                  //             '${batchQty.toStringAsFixed(1)} kg',
+                                  //             style: const TextStyle(
+                                  //                 fontSize: 9,
+                                  //                 color: Colors.blue,
+                                  //                 fontWeight: FontWeight.bold),
+                                  //           ),
+                                  //         ],
+                                  //       ),
+                                  //     ),
+                                  //   ),
                                 ],
                               ),
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   IconButton(
-                                    icon: Icon(Icons.edit_note,
-                                        color: Colors.blue),
+                                    icon: const Icon(Icons.edit_note,
+                                        color: Colors.blue, size: 18),
                                     onPressed: () => Navigator.push(
                                       context,
                                       MaterialPageRoute(
@@ -1693,12 +2191,16 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                             EditQtyPage(itemData: item),
                                       ),
                                     ),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(minWidth: 32),
                                   ),
                                   IconButton(
-                                    icon: Icon(Icons.delete,
-                                        color: Colors.red),
+                                    icon: const Icon(Icons.delete,
+                                        color: Colors.red, size: 18),
                                     onPressed: () =>
                                         _confirmDelete(item['key']),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(minWidth: 32),
                                   ),
                                 ],
                               ),
@@ -1748,13 +2250,13 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           size: 60,
                           color: _primaryColor.withOpacity(0.5),
                         ),
-                        SizedBox(height: 16),
+                        const SizedBox(height: 16),
                         Text(
                           "Select an item to view details",
                           style: TextStyle(
                               color: _textColor, fontSize: 16),
                         ),
-                        SizedBox(height: 8),
+                        const SizedBox(height: 8),
                         Text(
                           "Click on any item from the left panel",
                           style: TextStyle(
@@ -1783,12 +2285,10 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           ),
                           child: IntrinsicHeight(
                             child: Column(
-                              crossAxisAlignment:
-                              CrossAxisAlignment.start,
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Row(
-                                  mainAxisAlignment:
-                                  MainAxisAlignment.spaceBetween,
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                   children: [
                                     Text(
                                       "Item Details",
@@ -1797,321 +2297,275 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                           .titleLarge
                                           ?.copyWith(
                                         color: _primaryColor,
-                                        fontWeight:
-                                        FontWeight.bold,
+                                        fontWeight: FontWeight.bold,
                                       ),
                                     ),
                                     Row(
                                       children: [
-                                        if (_selectedItem![
-                                        'isBOM'] ==
-                                            true)
+                                        if (_selectedItem!['isBOM'] == true)
                                           Padding(
-                                            padding: EdgeInsets.only(
-                                                right: 8),
+                                            padding: EdgeInsets.only(right: 8),
                                             child: Chip(
                                               label: Text("BOM"),
-                                              backgroundColor:
-                                              Colors.blue[100],
+                                              backgroundColor: Colors.blue[100],
                                             ),
                                           ),
                                         IconButton(
-                                          icon: Icon(
-                                              Icons.attach_money,
+                                          icon: Icon(Icons.attach_money,
                                               color: _secondaryColor),
-                                          tooltip:
-                                          'View customer prices per combination',
-                                          onPressed: () =>
-                                              _showCustomerRates(
-                                                  _selectedItem!),
+                                          tooltip: 'View customer prices per combination',
+                                          onPressed: () => _showCustomerRates(_selectedItem!),
                                         ),
                                       ],
                                     ),
                                   ],
                                 ),
-                                Divider(
-                                    color: _primaryColor
-                                        .withOpacity(0.3)),
-                                SizedBox(height: 16),
+                                Divider(color: _primaryColor.withOpacity(0.3)),
+                                const SizedBox(height: 16),
 
                                 // Basic Info
                                 Card(
                                   elevation: 2,
-                                  margin:
-                                  EdgeInsets.only(bottom: 16),
+                                  margin: const EdgeInsets.only(bottom: 16),
                                   child: Padding(
                                     padding: EdgeInsets.all(12),
                                     child: Column(
-                                      crossAxisAlignment:
-                                      CrossAxisAlignment.start,
+                                      crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
                                         _buildDetailRow(
                                           "Size",
-                                          _selectedItem!['itemName']
-                                              ?.toString() ??
-                                              'N/A',
+                                          _selectedItem!['itemName']?.toString() ?? 'N/A',
                                           isBold: true,
                                         ),
                                         _buildDetailRow(
                                           "Description",
-                                          _selectedItem!['description']
-                                              ?.toString() ??
-                                              'No description',
+                                          _selectedItem!['description']?.toString() ?? 'No description',
                                         ),
                                         _buildDetailRow(
                                           "Unit",
-                                          _selectedItem!['unit']
-                                              ?.toString() ??
-                                              'N/A',
+                                          _selectedItem!['unit']?.toString() ?? 'N/A',
                                         ),
                                         _buildDetailRow(
                                           "Quantity On Hand",
-                                          _selectedItem!['qtyOnHand']
-                                              ?.toString() ??
-                                              '0',
+                                          _selectedItem!['qtyOnHand']?.toString() ?? '0',
                                         ),
-                                        if (_selectedItem![
-                                        'vendor'] !=
-                                            null)
+                                        if (_selectedItem!['vendor'] != null)
                                           _buildDetailRow(
                                             "Vendor",
-                                            _selectedItem!['vendor']
-                                                ?.toString() ??
-                                                'N/A',
+                                            _selectedItem!['vendor']?.toString() ?? 'N/A',
                                           ),
                                       ],
                                     ),
                                   ),
                                 ),
 
-                                // Combinations (with inline stock + customer prices)
+                                // Batch Section
+                                _buildBatchSection(_selectedItem!['itemName']?.toString() ?? ''),
+
+                                // Combinations
                                 _buildLengthBodyCombinations(),
 
-                                SizedBox(height: 16),
-                                Expanded(
-                                  child: SingleChildScrollView(
-                                    child: Container(
-                                      padding: EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: Colors.grey[50],
-                                        borderRadius:
-                                        BorderRadius.circular(
-                                            8),
-                                        border: Border.all(
-                                            color:
-                                            Colors.grey[200]!),
+                                const SizedBox(height: 16),
+
+                                // Average Price Summary - Fixed overflow
+                                Container(
+                                  padding: EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey[50],
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: Colors.grey[200]!),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min, // Added to prevent overflow
+                                    children: [
+                                      Text(
+                                        "Average Price Summary",
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 16,
+                                          color: _primaryColor,
+                                        ),
                                       ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                        CrossAxisAlignment.start,
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        "Based on ${_selectedItem!['lengthBodyCombinations'] != null ? (_selectedItem!['lengthBodyCombinations'] as List).length : 0} combination(s)",
+                                        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                                      ),
+                                      const SizedBox(height: 12),
+                                      Row(
                                         children: [
-                                          Text(
-                                            "Average Price Summary",
-                                            style: TextStyle(
-                                              fontWeight:
-                                              FontWeight.bold,
-                                              fontSize: 16,
-                                              color: _primaryColor,
+                                          Expanded(
+                                            child: _buildPriceCard(
+                                              "Avg Cost/Kg",
+                                              _selectedItem!['avgCostPricePerKg']?.toStringAsFixed(2) ?? '0.00',
+                                              Colors.blue[50]!,
                                             ),
                                           ),
-                                          SizedBox(height: 8),
-                                          Text(
-                                            "Based on ${_selectedItem!['lengthBodyCombinations'] != null ? (_selectedItem!['lengthBodyCombinations'] as List).length : 0} combination(s)",
-                                            style: TextStyle(
-                                                fontSize: 12,
-                                                color:
-                                                Colors.grey[600]),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: _buildPriceCard(
+                                              "Avg Sale/Kg",
+                                              _selectedItem!['avgSalePricePerKg']?.toStringAsFixed(2) ?? '0.00',
+                                              Colors.green[50]!,
+                                            ),
                                           ),
-                                          SizedBox(height: 12),
-                                          Row(
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+
+                                      // Profit Analysis - Fixed with SingleChildScrollView for horizontal scrolling if needed
+                                      if (_selectedItem!['profitPercentage1kg'] != null)
+                                        Container(
+                                          padding: EdgeInsets.all(8),
+                                          decoration: BoxDecoration(
+                                            color: Colors.orange[50],
+                                            borderRadius: BorderRadius.circular(8),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            mainAxisSize: MainAxisSize.min, // Critical for preventing overflow
                                             children: [
-                                              Expanded(
-                                                child: _buildPriceCard(
-                                                  "Avg Cost/Kg",
-                                                  _selectedItem!['avgCostPricePerKg']
-                                                      ?.toStringAsFixed(
-                                                      2) ??
-                                                      '0.00',
-                                                  Colors.blue[50]!,
+                                              Text(
+                                                "Profit Analysis",
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Colors.orange[700],
+                                                  fontSize: 13, // Slightly reduced
                                                 ),
                                               ),
-                                              SizedBox(width: 8),
-                                              Expanded(
-                                                child: _buildPriceCard(
-                                                  "Avg Sale/Kg",
-                                                  _selectedItem!['avgSalePricePerKg']
-                                                      ?.toStringAsFixed(
-                                                      2) ??
-                                                      '0.00',
-                                                  Colors.green[50]!,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                          SizedBox(height: 8),
-                                          if (_selectedItem![
-                                          'profitPercentage1kg'] !=
-                                              null)
-                                            Container(
-                                              padding:
-                                              EdgeInsets.all(8),
-                                              decoration:
-                                              BoxDecoration(
-                                                color:
-                                                Colors.orange[50],
-                                                borderRadius:
-                                                BorderRadius
-                                                    .circular(8),
-                                              ),
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                CrossAxisAlignment
-                                                    .start,
+                                              const SizedBox(height: 8),
+                                              // Use Wrap instead of Row for better responsiveness
+                                              Wrap(
+                                                spacing: 16,
+                                                runSpacing: 8,
                                                 children: [
-                                                  Text(
-                                                    "Profit Analysis",
-                                                    style: TextStyle(
-                                                        fontWeight:
-                                                        FontWeight
-                                                            .bold,
-                                                        color: Colors
-                                                            .orange[
-                                                        700]),
+                                                  // 1 Kg profit
+                                                  Container(
+                                                    width: 120, // Fixed width for consistency
+                                                    child: Column(
+                                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                                      children: [
+                                                        const Text(
+                                                          "1 Kg",
+                                                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                                                        ),
+                                                        const SizedBox(height: 4),
+                                                        Text(
+                                                          "PKR ${_selectedItem!['profitMargin1kg']?.toStringAsFixed(2) ?? '0.00'}",
+                                                          style: TextStyle(
+                                                            fontWeight: FontWeight.bold,
+                                                            fontSize: 12,
+                                                            color: (_selectedItem!['profitMargin1kg'] ?? 0) >= 0
+                                                                ? Colors.green
+                                                                : Colors.red,
+                                                          ),
+                                                        ),
+                                                        Text(
+                                                          "${_selectedItem!['profitPercentage1kg']?.toStringAsFixed(1)}%",
+                                                          style: TextStyle(
+                                                            fontSize: 11,
+                                                            color: (_selectedItem!['profitPercentage1kg'] ?? 0) >= 0
+                                                                ? Colors.green
+                                                                : Colors.red,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
                                                   ),
-                                                  SizedBox(height: 8),
-                                                  Row(
-                                                    children: [
-                                                      Expanded(
-                                                        child: Column(
-                                                          children: [
-                                                            Text(
-                                                                "1 Kg",
-                                                                style: TextStyle(
-                                                                    fontSize:
-                                                                    12)),
-                                                            Text(
-                                                              "PKR ${_selectedItem!['profitMargin1kg']?.toStringAsFixed(2) ?? '0.00'}",
-                                                              style: TextStyle(
-                                                                  fontWeight: FontWeight.bold,
-                                                                  color: (_selectedItem!['profitMargin1kg'] ?? 0) >= 0 ? Colors.green : Colors.red),
-                                                            ),
-                                                            Text(
-                                                              "${_selectedItem!['profitPercentage1kg']?.toStringAsFixed(1)}%",
-                                                              style: TextStyle(
-                                                                  fontSize: 11,
-                                                                  color: (_selectedItem!['profitPercentage1kg'] ?? 0) >= 0 ? Colors.green : Colors.red),
-                                                            ),
-                                                          ],
+                                                  // 50 Kg profit
+                                                  Container(
+                                                    width: 120, // Fixed width for consistency
+                                                    child: Column(
+                                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                                      children: [
+                                                        const Text(
+                                                          "50 Kg",
+                                                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
                                                         ),
-                                                      ),
-                                                      Expanded(
-                                                        child: Column(
-                                                          children: [
-                                                            Text(
-                                                                "50 Kg",
-                                                                style: TextStyle(
-                                                                    fontSize:
-                                                                    12)),
-                                                            Text(
-                                                              "PKR ${_selectedItem!['profitMargin50kg']?.toStringAsFixed(2) ?? '0.00'}",
-                                                              style: TextStyle(
-                                                                  fontWeight: FontWeight.bold,
-                                                                  color: (_selectedItem!['profitMargin50kg'] ?? 0) >= 0 ? Colors.green : Colors.red),
-                                                            ),
-                                                            Text(
-                                                              "${_selectedItem!['profitPercentage50kg']?.toStringAsFixed(1)}%",
-                                                              style: TextStyle(
-                                                                  fontSize: 11,
-                                                                  color: (_selectedItem!['profitPercentage50kg'] ?? 0) >= 0 ? Colors.green : Colors.red),
-                                                            ),
-                                                          ],
+                                                        const SizedBox(height: 4),
+                                                        Text(
+                                                          "PKR ${_selectedItem!['profitMargin50kg']?.toStringAsFixed(2) ?? '0.00'}",
+                                                          style: TextStyle(
+                                                            fontWeight: FontWeight.bold,
+                                                            fontSize: 12,
+                                                            color: (_selectedItem!['profitMargin50kg'] ?? 0) >= 0
+                                                                ? Colors.green
+                                                                : Colors.red,
+                                                          ),
                                                         ),
-                                                      ),
-                                                    ],
+                                                        Text(
+                                                          "${_selectedItem!['profitPercentage50kg']?.toStringAsFixed(1)}%",
+                                                          style: TextStyle(
+                                                            fontSize: 11,
+                                                            color: (_selectedItem!['profitPercentage50kg'] ?? 0) >= 0
+                                                                ? Colors.green
+                                                                : Colors.red,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
                                                   ),
                                                 ],
                                               ),
-                                            ),
-                                        ],
-                                      ),
-                                    ),
+                                            ],
+                                          ),
+                                        ),
+                                    ],
                                   ),
                                 ),
 
                                 // BOM Components
-                                if (_selectedItem!['isBOM'] == true &&
-                                    _selectedItem!['components'] !=
-                                        null) ...[
-                                  SizedBox(height: 16),
+                                if (_selectedItem!['isBOM'] == true && _selectedItem!['components'] != null) ...[
+                                  const SizedBox(height: 16),
                                   Card(
                                     elevation: 2,
                                     child: Padding(
                                       padding: EdgeInsets.all(12),
                                       child: Column(
-                                        crossAxisAlignment:
-                                        CrossAxisAlignment.start,
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min, // Added
                                         children: [
-                                          Text("BOM Components:",
-                                              style: TextStyle(
-                                                  fontWeight:
-                                                  FontWeight.bold,
-                                                  fontSize: 16,
-                                                  color:
-                                                  _primaryColor)),
-                                          SizedBox(height: 8),
+                                          Text(
+                                            "BOM Components:",
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                              color: _primaryColor,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
                                           Container(
                                             height: 150,
                                             decoration: BoxDecoration(
-                                              border: Border.all(
-                                                  color: Colors
-                                                      .grey[300]!),
-                                              borderRadius:
-                                              BorderRadius.circular(
-                                                  8),
+                                              border: Border.all(color: Colors.grey[300]!),
+                                              borderRadius: BorderRadius.circular(8),
                                             ),
                                             child: ListView.builder(
-                                              padding:
-                                              EdgeInsets.all(8),
-                                              itemCount: _selectedItem![
-                                              'components']
-                                                  .length,
-                                              itemBuilder:
-                                                  (context, index) {
-                                                final component =
-                                                _selectedItem![
-                                                'components'][index];
+                                              padding: EdgeInsets.all(8),
+                                              itemCount: _selectedItem!['components'].length,
+                                              itemBuilder: (context, index) {
+                                                final component = _selectedItem!['components'][index];
                                                 return Card(
-                                                  margin: EdgeInsets
-                                                      .symmetric(
-                                                      vertical: 4),
+                                                  margin: EdgeInsets.symmetric(vertical: 4),
                                                   elevation: 1,
                                                   child: ListTile(
-                                                    contentPadding:
-                                                    EdgeInsets
-                                                        .symmetric(
-                                                        horizontal:
-                                                        12),
-                                                    title: Text(
-                                                        component[
-                                                        'name'] ??
-                                                            'Unnamed'),
-                                                    subtitle: Text(
-                                                        '${component['quantity']} ${component['unit']}'),
-                                                    trailing: Text(
-                                                        '${(component['price'] * component['quantity']).toStringAsFixed(2)} PKR'),
+                                                    contentPadding: EdgeInsets.symmetric(horizontal: 12),
+                                                    title: Text(component['name'] ?? 'Unnamed'),
+                                                    subtitle: Text('${component['quantity']} ${component['unit']}'),
+                                                    trailing: Text('${(component['price'] * component['quantity']).toStringAsFixed(2)} PKR'),
                                                   ),
                                                 );
                                               },
                                             ),
                                           ),
-                                          SizedBox(height: 8),
+                                          const SizedBox(height: 8),
                                           Text(
                                             "Total BOM Cost: PKR ${_selectedItem!['costPrice']?.toStringAsFixed(2) ?? '0.00'}",
                                             style: TextStyle(
-                                                fontWeight:
-                                                FontWeight.bold,
-                                                color:
-                                                Colors.blue[700]),
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.blue[700],
+                                            ),
                                           ),
                                         ],
                                       ),
@@ -2119,21 +2573,19 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                   ),
                                 ],
 
-                                Spacer(),
-                                SizedBox(height: 16),
+                                const Spacer(),
+                                const SizedBox(height: 16),
                                 Row(
-                                  mainAxisAlignment:
-                                  MainAxisAlignment.end,
+                                  mainAxisAlignment: MainAxisAlignment.end,
                                   children: [
                                     ElevatedButton(
                                       style: ElevatedButton.styleFrom(
                                         backgroundColor: _primaryColor,
                                         shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                          BorderRadius.circular(8),
+                                          borderRadius: BorderRadius.circular(8),
                                         ),
                                       ),
-                                      child: Row(
+                                      child: const Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           Icon(Icons.edit, size: 16),
@@ -2141,19 +2593,17 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                           Text("Edit Item"),
                                         ],
                                       ),
-                                      onPressed: () =>
-                                          updateItem(_selectedItem!),
+                                      onPressed: () => updateItem(_selectedItem!),
                                     ),
-                                    SizedBox(width: 10),
+                                    const SizedBox(width: 10),
                                     ElevatedButton(
                                       style: ElevatedButton.styleFrom(
                                         backgroundColor: Colors.red,
                                         shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                          BorderRadius.circular(8),
+                                          borderRadius: BorderRadius.circular(8),
                                         ),
                                       ),
-                                      child: Row(
+                                      child: const Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           Icon(Icons.delete, size: 16),
@@ -2161,8 +2611,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                                           Text("Delete"),
                                         ],
                                       ),
-                                      onPressed: () => _confirmDelete(
-                                          _selectedItem!['key']),
+                                      onPressed: () => _confirmDelete(_selectedItem!['key']),
                                     ),
                                   ],
                                 ),
@@ -2190,13 +2639,13 @@ class _ItemsListPageState extends State<ItemsListPage> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.start,
                     children: [
-                      SizedBox(height: 20),
+                      const SizedBox(height: 20),
                       Text("Item Image",
                           style: TextStyle(
                               color: _primaryColor,
                               fontWeight: FontWeight.bold,
                               fontSize: 18)),
-                      SizedBox(height: 20),
+                      const SizedBox(height: 20),
                       GestureDetector(
                         onTap: () {
                           if (_selectedItem != null &&
@@ -2236,7 +2685,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                             children: [
                               Icon(Icons.image,
                                   size: 60, color: _secondaryColor),
-                              SizedBox(height: 8),
+                              const SizedBox(height: 8),
                               Text("No Image",
                                   style: TextStyle(
                                       color: _secondaryColor,
@@ -2245,13 +2694,13 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           ),
                         ),
                       ),
-                      SizedBox(height: 20),
+                      const SizedBox(height: 20),
                       if (_selectedItem != null)
                         _buildStatCard(
                           "Stock Value",
                           "PKR ${((_selectedItem!['qtyOnHand'] ?? 0) * (_selectedItem!['avgSalePricePerKg'] ?? _selectedItem!['salePrice1kg'] ?? 0)).toStringAsFixed(2)}",
                         ),
-                      SizedBox(height: 10),
+                      const SizedBox(height: 10),
                       if (_selectedItem != null &&
                           _selectedItem!['lengthBodyCombinations'] != null)
                         _buildStatCard(
@@ -2260,11 +2709,11 @@ class _ItemsListPageState extends State<ItemsListPage> {
                           icon: Icons.layers,
                           color: Colors.purple,
                         ),
-                      SizedBox(height: 10),
+                      const SizedBox(height: 10),
 
-                      // ── NEW: Stock Summary card ──────────────────────
+                      // Stock Summary card
                       _buildStockSummaryCard(),
-                      SizedBox(height: 10),
+                      const SizedBox(height: 10),
 
                       if (_selectedItem != null)
                         _buildStatCard(
@@ -2287,7 +2736,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           color: _cardColor,
-          borderRadius: BorderRadius.only(
+          borderRadius: const BorderRadius.only(
             topLeft: Radius.circular(12),
             topRight: Radius.circular(12),
           ),
@@ -2309,7 +2758,7 @@ class _ItemsListPageState extends State<ItemsListPage> {
                 labelColor: _primaryColor,
                 unselectedLabelColor: _textColor.withOpacity(0.6),
                 indicatorColor: _primaryColor,
-                tabs: [
+                tabs: const [
                   Tab(text: 'Purchases'),
                   Tab(text: 'BOM Builds'),
                   Tab(text: 'Sales'),
@@ -2332,18 +2781,59 @@ class _ItemsListPageState extends State<ItemsListPage> {
 
       floatingActionButton: FloatingActionButton(
         backgroundColor: _primaryColor,
-        child: Icon(Icons.add, color: Colors.white),
+        child: const Icon(Icons.add, color: Colors.white),
         onPressed: () {
           Navigator.push(
             context,
             MaterialPageRoute(builder: (context) => RegisterItemPage()),
-          ).then((_) => fetchItems());
+          ).then((_) {
+            fetchItems();
+            _fetchAllBatches();
+          });
         },
       ),
     );
   }
 
-  // ── All unchanged helper methods ──────────────────────────────────────────
+// Helper method for compact stock chips to prevent overflow
+  Widget _buildCompactStockChips(Map<String, dynamic> item) {
+    final combinations = item['lengthBodyCombinations'];
+    if (combinations == null || combinations.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Wrap(
+      spacing: 4,
+      runSpacing: 2,
+      children: combinations.map<Widget>((combo) {
+        final qty = (combo['stockQuantity'] as num?)?.toDouble() ?? 0;
+        final threshold = (combo['lowStockThreshold'] as num?)?.toDouble() ?? 10;
+
+        Color chipColor;
+        if (qty <= 0) {
+          chipColor = Colors.red[100]!;
+        } else if (qty <= threshold) {
+          chipColor = Colors.orange[100]!;
+        } else {
+          chipColor = Colors.green[100]!;
+        }
+
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: chipColor,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            '${combo['length'] ?? 'N/A'} - ${combo['body'] ?? 'N/A'}: ${qty.toStringAsFixed(1)}',
+            style: const TextStyle(fontSize: 9),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  // ── All remaining helper methods (unchanged) ──────────────────────────────
 
   Widget _buildSalesTab() {
     return FutureBuilder(
