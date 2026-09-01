@@ -34,6 +34,9 @@ import 'items/ItemslistPage.dart';
 import 'items/inandoutpage.dart';
 import 'Purchase/purchaselistpage.dart';
 
+// ─── NEW IMPORTS FOR CUSTOMER RETURN ───
+
+
 class Dashboard extends StatefulWidget {
   const Dashboard({super.key});
 
@@ -47,7 +50,6 @@ class _DashboardState extends State<Dashboard> {
   @override
   void initState() {
     super.initState();
-    // Moved here from build() to prevent continuous database calls on rebuild
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkReminders(context);
     });
@@ -82,7 +84,7 @@ class _DashboardState extends State<Dashboard> {
     final isDesktop = MediaQuery.of(context).size.width > 800;
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F7FC), // Soft modern background color
+      backgroundColor: const Color(0xFFF4F7FC),
       appBar: AppBar(
         backgroundColor: Colors.white,
         surfaceTintColor: Colors.transparent,
@@ -92,7 +94,7 @@ class _DashboardState extends State<Dashboard> {
           style: const TextStyle(
             fontWeight: FontWeight.w800,
             letterSpacing: 0.5,
-            color: Color(0xFF1E293B), // Slate 800
+            color: Color(0xFF1E293B),
           ),
         ),
         centerTitle: true,
@@ -174,7 +176,6 @@ class _DashboardState extends State<Dashboard> {
           ),
           const SizedBox(height: 10),
           const Divider(color: Color(0xFFE2E8F0)),
-          // Menu Items
           Expanded(
             child: ListView(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -198,7 +199,6 @@ class _DashboardState extends State<Dashboard> {
               ],
             ),
           ),
-          // Logout Button at Bottom
           Padding(
             padding: const EdgeInsets.all(16.0),
             child: ElevatedButton.icon(
@@ -206,7 +206,7 @@ class _DashboardState extends State<Dashboard> {
               icon: const Icon(Icons.logout_rounded, color: Colors.white),
               label: Text(languageProvider.isEnglish ? 'Logout' : 'لاگ آوٹ', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFEF4444), // Red 500
+                backgroundColor: const Color(0xFFEF4444),
                 minimumSize: const Size(double.infinity, 50),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 elevation: 0,
@@ -218,13 +218,35 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
+  Widget _sidebarSectionHeader(String en, String ur, LanguageProvider lang) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+      child: Text(
+        lang.isEnglish ? en : ur,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+          color: Colors.grey[600],
+          letterSpacing: 0.5,
+        ),
+      ),
+    );
+  }
+
+  Widget _sidebarDivider() {
+    return const Padding(
+      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Divider(color: Color(0xFFE2E8F0)),
+    );
+  }
+
   Widget _sidebarItem(IconData icon, String en, String ur, VoidCallback onTap, LanguageProvider lang) {
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
       child: ListTile(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        hoverColor: const Color(0xFFF1F5F9), // Slate 100
-        leading: Icon(icon, color: const Color(0xFF64748B), size: 22), // Slate 500
+        hoverColor: const Color(0xFFF1F5F9),
+        leading: Icon(icon, color: const Color(0xFF64748B), size: 22),
         title: Text(
           lang.isEnglish ? en : ur,
           style: const TextStyle(color: Color(0xFF334155), fontWeight: FontWeight.w600, fontSize: 14),
@@ -236,20 +258,22 @@ class _DashboardState extends State<Dashboard> {
 
   Widget _buildContent(BuildContext context, LanguageProvider languageProvider) {
     final dashboardItems = [
-      {'icon': Icons.receipt_long, 'titleEn': 'Gate Pass', 'titleUr': 'گیٹ پاس', 'color': const Color(0xFF8B5CF6), 'page': QuotationListPage()}, // Purple
-      {'icon': Icons.inventory_2, 'titleEn': 'Quotations', 'titleUr': 'Quotations', 'color': const Color(0xFFF59E0B), 'page': QuoteListPageOrg()}, // Amber
-      {'icon': Icons.inventory_2, 'titleEn': 'Invoice', 'titleUr': 'انوائس اندراج', 'color': const Color(0xFFF59E0B), 'page': filledListpage()}, // Amber
-      {'icon': Icons.money_off, 'titleEn': 'Expenses', 'titleUr': 'اخراجات', 'color': const Color(0xFFEF4444), 'page': ViewExpensesPage()}, // Red
-      {'icon': Icons.engineering, 'titleEn': 'Employee', 'titleUr': 'ورکر', 'color': const Color(0xFF10B981), 'page': HomeScreen()}, // Emerald
-      {'icon': Icons.groups, 'titleEn': 'Customers', 'titleUr': 'کسٹمرز', 'color': const Color(0xFF3B82F6), 'page': CustomerList()}, // Blue
-      {'icon': Icons.account_balance_wallet, 'titleEn': 'View Ledger', 'titleUr': 'کھاتہ دیکھیں', 'color': const Color(0xFF14B8A6), 'page': const LedgerSelection()}, // Teal
-      {'icon': Icons.analytics, 'titleEn': 'Reports', 'titleUr': 'رپورٹس', 'color': const Color(0xFF6366F1), 'page': const ReportsPage()}, // Indigo
-      {'icon': Icons.pie_chart, 'titleEn': 'Balance Summary', 'titleUr': 'بیلنس سمری', 'color': const Color(0xFFEC4899), 'page': EnhancedTransactionsPage()}, // Pink
-      {'icon': Icons.settings, 'titleEn': 'Settings', 'titleUr': 'ترتیبات', 'color': const Color(0xFF64748B), 'page': UsersPage()}, // Slate
+
+      // ─── EXISTING CARDS ───
+      {'icon': Icons.receipt_long, 'titleEn': 'Gate Pass', 'titleUr': 'گیٹ پاس', 'color': const Color(0xFF8B5CF6), 'page': QuotationListPage()},
+      {'icon': Icons.inventory_2, 'titleEn': 'Quotations', 'titleUr': 'Quotations', 'color': const Color(0xFFF59E0B), 'page': QuoteListPageOrg()},
+      {'icon': Icons.inventory_2, 'titleEn': 'Invoice', 'titleUr': 'انوائس اندراج', 'color': const Color(0xFFF59E0B), 'page': filledListpage()},
+      {'icon': Icons.money_off, 'titleEn': 'Expenses', 'titleUr': 'اخراجات', 'color': const Color(0xFFEF4444), 'page': ViewExpensesPage()},
+      {'icon': Icons.engineering, 'titleEn': 'Employee', 'titleUr': 'ورکر', 'color': const Color(0xFF10B981), 'page': HomeScreen()},
+      {'icon': Icons.groups, 'titleEn': 'Customers', 'titleUr': 'کسٹمرز', 'color': const Color(0xFF3B82F6), 'page': CustomerList()},
+      {'icon': Icons.account_balance_wallet, 'titleEn': 'View Ledger', 'titleUr': 'کھاتہ دیکھیں', 'color': const Color(0xFF14B8A6), 'page': const LedgerSelection()},
+      {'icon': Icons.analytics, 'titleEn': 'Reports', 'titleUr': 'رپورٹس', 'color': const Color(0xFF6366F1), 'page': const ReportsPage()},
+      {'icon': Icons.pie_chart, 'titleEn': 'Balance Summary', 'titleUr': 'بیلنس سمری', 'color': const Color(0xFFEC4899), 'page': EnhancedTransactionsPage()},
+      {'icon': Icons.settings, 'titleEn': 'Settings', 'titleUr': 'ترتیبات', 'color': const Color(0xFF64748B), 'page': UsersPage()},
     ];
+
     return Column(
       children: [
-        // Welcome Banner
         Container(
           width: double.infinity,
           margin: const EdgeInsets.all(20),
@@ -287,12 +311,11 @@ class _DashboardState extends State<Dashboard> {
           ),
         ),
 
-        // Grid View
         Expanded(
           child: GridView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
             gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 220, // Fluidly adapts columns based on screen size
+              maxCrossAxisExtent: 220,
               crossAxisSpacing: 20,
               mainAxisSpacing: 20,
               childAspectRatio: 1.1,
@@ -347,7 +370,7 @@ class _DashboardState extends State<Dashboard> {
               style: const TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.w700,
-                color: Color(0xFF334155), // Slate 700
+                color: Color(0xFF334155),
                 height: 1.2,
               ),
               maxLines: 2,
@@ -429,7 +452,7 @@ class _DashboardState extends State<Dashboard> {
   }
 }
 
-// Custom Widget to handle smooth Hover scale effect (especially nice on Web/Desktop)
+// Custom Widget to handle smooth Hover scale effect
 class HoverableCard extends StatefulWidget {
   final Widget child;
   final VoidCallback onTap;

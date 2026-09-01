@@ -54,6 +54,21 @@ class _CustomerListState extends State<CustomerList> {
   bool _isLoading = false;
   bool _isSearchingDatabase = false;
 
+
+
+  String _receiveMode = 'Cash'; // 'Cash' or 'ItemReturn'
+  List<Map<String, dynamic>> _availableItems = []; // fetched from 'items' node
+  String? _selectedReturnItemId;
+  String? _selectedReturnItemName;
+  TextEditingController _returnQtyController = TextEditingController();
+  TextEditingController _returnRateController = TextEditingController();
+  double get _returnItemTotal {
+    final qty = double.tryParse(_returnQtyController.text) ?? 0.0;
+    final rate = double.tryParse(_returnRateController.text) ?? 0.0;
+    return qty * rate;
+  }
+
+
   @override
   void initState() {
     super.initState();
@@ -86,6 +101,117 @@ class _CustomerListState extends State<CustomerList> {
         _selectedCustomerIds = _allCustomers.map((c) => c.id).toSet();
       }
     });
+  }
+
+  Future<void> _fetchAvailableItems() async {
+    if (_availableItems.isNotEmpty) return; // cache
+    try {
+      final snapshot = await _db.child('items').get();
+      if (snapshot.exists) {
+        final data = snapshot.value as Map<dynamic, dynamic>;
+        _availableItems = data.entries.map((e) {
+          final item = e.value as Map<dynamic, dynamic>;
+          return {
+            'id': e.key.toString(),
+            'itemName': item['itemName']?.toString() ?? '',
+            'qtyOnHand': (item['qtyOnHand'] as num?)?.toDouble() ?? 0.0,
+            'avgSalePricePerKg':
+            (item['avgSalePricePerKg'] as num?)?.toDouble() ?? 0.0,
+          };
+        }).toList();
+      }
+    } catch (e) {
+      print("Error fetching items for return: $e");
+    }
+  }
+
+  Future<Map<String, dynamic>?> _selectReturnItem(BuildContext context) async {
+    await _fetchAvailableItems();
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
+    Map<String, dynamic>? selected;
+    final TextEditingController searchController = TextEditingController();
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            final query = searchController.text.toLowerCase();
+            final filtered = query.isEmpty
+                ? _availableItems
+                : _availableItems
+                .where((it) => (it['itemName'] as String)
+                .toLowerCase()
+                .contains(query))
+                .toList();
+            return AlertDialog(
+              title: Text(languageProvider.isEnglish
+                  ? 'Select Item to Return'
+                  : 'واپس آنے والا آئٹم منتخب کریں'),
+              content: SizedBox(
+                width: double.maxFinite,
+                height: 400,
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: searchController,
+                      decoration: InputDecoration(
+                        prefixIcon: Icon(Icons.search),
+                        hintText: languageProvider.isEnglish
+                            ? 'Search item...'
+                            : 'آئٹم تلاش کریں...',
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? Center(
+                          child: Text(languageProvider.isEnglish
+                              ? 'No items found'
+                              : 'کوئی آئٹم نہیں ملا'))
+                          : ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: filtered.length,
+                        itemBuilder: (context, index) {
+                          final item = filtered[index];
+                          return Card(
+                            margin:
+                            EdgeInsets.symmetric(vertical: 4),
+                            child: ListTile(
+                              title: Text(item['itemName'],
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold)),
+                              subtitle: Text(
+                                  'Stock: ${(item['qtyOnHand'] as double).toStringAsFixed(2)} | Rate: ${(item['avgSalePricePerKg'] as double).toStringAsFixed(2)}'),
+                              onTap: () {
+                                selected = item;
+                                Navigator.pop(context);
+                              },
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(languageProvider.isEnglish
+                      ? 'Cancel'
+                      : 'منسوخ کریں'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    return selected;
   }
 
   List<Customer> get _selectedCustomers =>
@@ -657,6 +783,14 @@ class _CustomerListState extends State<CustomerList> {
     Provider.of<LanguageProvider>(context, listen: false);
     final filledProvider =
     Provider.of<FilledProvider>(context, listen: false);
+
+    // Reset transient state each time dialog opens
+    _receiveMode = 'Cash';
+    _selectedReturnItemId = null;
+    _selectedReturnItemName = null;
+    _returnQtyController.clear();
+    _returnRateController.clear();
+
     await showDialog(
       context: context,
       builder: (context) {
@@ -664,16 +798,102 @@ class _CustomerListState extends State<CustomerList> {
           builder: (context, setState) {
             return AlertDialog(
               title: Text(languageProvider.isEnglish
-                  ? 'Make Payment'
-                  : 'ادائیگی کریں'),
+                  ? 'Receive from Customer'
+                  : 'کسٹمر سے وصولی'),
               content: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // ── NEW: Cash vs Item Return toggle ──
+                    Container(
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey[300]!),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: InkWell(
+                              onTap: () =>
+                                  setState(() => _receiveMode = 'Cash'),
+                              child: Container(
+                                padding: EdgeInsets.symmetric(vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: _receiveMode == 'Cash'
+                                      ? Colors.orange
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.horizontal(
+                                      left: Radius.circular(7)),
+                                ),
+                                child: Column(
+                                  children: [
+                                    Icon(Icons.payments,
+                                        color: _receiveMode == 'Cash'
+                                            ? Colors.white
+                                            : Colors.grey[600]),
+                                    Text(
+                                      languageProvider.isEnglish
+                                          ? 'Payment'
+                                          : 'ادائیگی',
+                                      style: TextStyle(
+                                        color: _receiveMode == 'Cash'
+                                            ? Colors.white
+                                            : Colors.grey[600],
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: InkWell(
+                              onTap: () async {
+                                await _fetchAvailableItems();
+                                setState(() => _receiveMode = 'ItemReturn');
+                              },
+                              child: Container(
+                                padding: EdgeInsets.symmetric(vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: _receiveMode == 'ItemReturn'
+                                      ? Colors.teal
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.horizontal(
+                                      right: Radius.circular(7)),
+                                ),
+                                child: Column(
+                                  children: [
+                                    Icon(Icons.assignment_return,
+                                        color: _receiveMode == 'ItemReturn'
+                                            ? Colors.white
+                                            : Colors.grey[600]),
+                                    Text(
+                                      languageProvider.isEnglish
+                                          ? 'Item Return'
+                                          : 'آئٹم واپسی',
+                                      style: TextStyle(
+                                        color: _receiveMode == 'ItemReturn'
+                                            ? Colors.white
+                                            : Colors.grey[600],
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Date picker (used by both modes)
                     ListTile(
                       title: Text(languageProvider.isEnglish
-                          ? 'Payment Date: ${DateFormat('yyyy-MM-dd – HH:mm').format(_selectedPaymentDate)}'
-                          : 'ادائیگی کی تاریخ: ${DateFormat('yyyy-MM-dd – HH:mm').format(_selectedPaymentDate)}'),
+                          ? 'Date: ${DateFormat('yyyy-MM-dd – HH:mm').format(_selectedPaymentDate)}'
+                          : 'تاریخ: ${DateFormat('yyyy-MM-dd – HH:mm').format(_selectedPaymentDate)}'),
                       trailing: const Icon(Icons.calendar_today),
                       onTap: () async {
                         final pickedDate = await showDatePicker(
@@ -686,8 +906,8 @@ class _CustomerListState extends State<CustomerList> {
                         if (pickedDate != null) {
                           final pickedTime = await showTimePicker(
                             context: context,
-                            initialTime: TimeOfDay.fromDateTime(
-                                _selectedPaymentDate),
+                            initialTime:
+                            TimeOfDay.fromDateTime(_selectedPaymentDate),
                           );
                           if (pickedTime != null) {
                             setState(() {
@@ -703,155 +923,262 @@ class _CustomerListState extends State<CustomerList> {
                         }
                       },
                     ),
-                    DropdownButtonFormField<String>(
-                      value: _selectedPaymentMethod,
-                      items: [
-                        DropdownMenuItem(
-                            value: 'Cash',
-                            child: Text(languageProvider.isEnglish
-                                ? 'Cash'
-                                : 'نقدی')),
-                        DropdownMenuItem(
-                            value: 'Online',
-                            child: Text(languageProvider.isEnglish
-                                ? 'Online'
-                                : 'آن لائن')),
-                        DropdownMenuItem(
-                            value: 'Cheque',
-                            child: Text(languageProvider.isEnglish
-                                ? 'Cheque'
-                                : 'چیک')),
-                        DropdownMenuItem(
-                            value: 'Bank',
-                            child: Text(languageProvider.isEnglish
-                                ? 'Bank'
-                                : 'بینک')),
-                        DropdownMenuItem(
-                            value: 'Slip',
-                            child: Text(languageProvider.isEnglish
-                                ? 'Slip'
-                                : 'پرچی')),
-                      ],
-                      onChanged: (value) =>
-                          setState(() => _selectedPaymentMethod = value),
-                      decoration: InputDecoration(
-                        labelText: languageProvider.isEnglish
-                            ? 'Select Payment Method'
-                            : 'ادائیگی کا طریقہ منتخب کریں',
-                        border: const OutlineInputBorder(),
-                      ),
-                    ),
-                    if (_selectedPaymentMethod == 'Cheque') ...[
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: _chequeNumberController,
+
+                    // ============================================
+                    // CASH PAYMENT SECTION
+                    // ============================================
+                    if (_receiveMode == 'Cash') ...[
+                      DropdownButtonFormField<String>(
+                        value: _selectedPaymentMethod,
+                        items: [
+                          DropdownMenuItem(
+                              value: 'Cash',
+                              child: Text(languageProvider.isEnglish
+                                  ? 'Cash'
+                                  : 'نقدی')),
+                          DropdownMenuItem(
+                              value: 'Online',
+                              child: Text(languageProvider.isEnglish
+                                  ? 'Online'
+                                  : 'آن لائن')),
+                          DropdownMenuItem(
+                              value: 'Cheque',
+                              child: Text(languageProvider.isEnglish
+                                  ? 'Cheque'
+                                  : 'چیک')),
+                          DropdownMenuItem(
+                              value: 'Bank',
+                              child: Text(languageProvider.isEnglish
+                                  ? 'Bank'
+                                  : 'بینک')),
+                          DropdownMenuItem(
+                              value: 'Slip',
+                              child: Text(languageProvider.isEnglish
+                                  ? 'Slip'
+                                  : 'پرچی')),
+                        ],
+                        onChanged: (value) =>
+                            setState(() => _selectedPaymentMethod = value),
                         decoration: InputDecoration(
                           labelText: languageProvider.isEnglish
-                              ? 'Cheque Number'
-                              : 'چیک نمبر',
+                              ? 'Select Payment Method'
+                              : 'ادائیگی کا طریقہ منتخب کریں',
                           border: const OutlineInputBorder(),
                         ),
                       ),
-                      const SizedBox(height: 8),
-                      ListTile(
-                        title: Text(_selectedChequeDate == null
-                            ? (languageProvider.isEnglish
-                            ? 'Select Cheque Date'
-                            : 'چیک کی تاریخ منتخب کریں')
-                            : DateFormat('yyyy-MM-dd')
-                            .format(_selectedChequeDate!)),
-                        trailing: const Icon(Icons.calendar_today),
-                        onTap: () async {
-                          final pickedDate = await showDatePicker(
-                            context: context,
-                            initialDate: DateTime.now(),
-                            firstDate: DateTime(2000),
-                            lastDate: DateTime(2100),
-                          );
-                          if (pickedDate != null)
-                            setState(() => _selectedChequeDate = pickedDate);
-                        },
-                      ),
-                      const SizedBox(height: 8),
-                      Card(
-                        child: ListTile(
-                          title: Text(_selectedBankName ??
-                              (languageProvider.isEnglish
-                                  ? 'Select Bank'
-                                  : 'بینک منتخب کریں')),
-                          trailing: const Icon(Icons.arrow_drop_down),
+                      if (_selectedPaymentMethod == 'Cheque') ...[
+                        const SizedBox(height: 16),
+                        TextField(
+                          controller: _chequeNumberController,
+                          decoration: InputDecoration(
+                            labelText: languageProvider.isEnglish
+                                ? 'Cheque Number'
+                                : 'چیک نمبر',
+                            border: const OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        ListTile(
+                          title: Text(_selectedChequeDate == null
+                              ? (languageProvider.isEnglish
+                              ? 'Select Cheque Date'
+                              : 'چیک کی تاریخ منتخب کریں')
+                              : DateFormat('yyyy-MM-dd')
+                              .format(_selectedChequeDate!)),
+                          trailing: const Icon(Icons.calendar_today),
                           onTap: () async {
-                            final selectedBank = await _selectBank(context);
-                            if (selectedBank != null) {
-                              setState(() {
-                                _selectedBankId = selectedBank['id'];
-                                _selectedBankName = selectedBank['name'];
-                              });
-                            }
+                            final pickedDate = await showDatePicker(
+                              context: context,
+                              initialDate: DateTime.now(),
+                              firstDate: DateTime(2000),
+                              lastDate: DateTime(2100),
+                            );
+                            if (pickedDate != null)
+                              setState(
+                                      () => _selectedChequeDate = pickedDate);
                           },
                         ),
-                      ),
-                    ],
-                    if (_selectedPaymentMethod == 'Bank') ...[
+                        const SizedBox(height: 8),
+                        Card(
+                          child: ListTile(
+                            title: Text(_selectedBankName ??
+                                (languageProvider.isEnglish
+                                    ? 'Select Bank'
+                                    : 'بینک منتخب کریں')),
+                            trailing: const Icon(Icons.arrow_drop_down),
+                            onTap: () async {
+                              final selectedBank = await _selectBank(context);
+                              if (selectedBank != null) {
+                                setState(() {
+                                  _selectedBankId = selectedBank['id'];
+                                  _selectedBankName = selectedBank['name'];
+                                });
+                              }
+                            },
+                          ),
+                        ),
+                      ],
+                      if (_selectedPaymentMethod == 'Bank') ...[
+                        const SizedBox(height: 16),
+                        Card(
+                          child: ListTile(
+                            title: Text(_selectedBankName ??
+                                (languageProvider.isEnglish
+                                    ? 'Select Bank'
+                                    : 'بینک منتخب کریں')),
+                            trailing: const Icon(Icons.arrow_drop_down),
+                            onTap: () async {
+                              final selectedBank = await _selectBank(context);
+                              if (selectedBank != null) {
+                                setState(() {
+                                  _selectedBankId = selectedBank['id'];
+                                  _selectedBankName = selectedBank['name'];
+                                });
+                              }
+                            },
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 16),
+                      TextField(
+                        controller: _paymentAmountController,
+                        keyboardType: TextInputType.number,
+                        decoration: InputDecoration(
+                          labelText: languageProvider.isEnglish
+                              ? 'Payment Amount'
+                              : 'ادائیگی کی رقم',
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        onChanged: (value) => _paymentDescription = value,
+                        decoration: InputDecoration(
+                          labelText: languageProvider.isEnglish
+                              ? 'Description'
+                              : 'تفصیل',
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      ElevatedButton(
+                        onPressed: () async {
+                          final image = await _pickImage(context);
+                          if (image != null)
+                            setState(() => _paymentImage = image);
+                        },
+                        child: Text(languageProvider.isEnglish
+                            ? 'Upload Receipt'
+                            : 'رسید اپ لوڈ کریں'),
+                      ),
+                      if (_paymentImage != null)
+                        Container(
+                          margin: const EdgeInsets.only(top: 16),
+                          height: 100,
+                          width: 100,
+                          child: Image.memory(_paymentImage!),
+                        ),
+                    ],
+
+                    // ============================================
+                    // ITEM RETURN SECTION
+                    // ============================================
+                    if (_receiveMode == 'ItemReturn') ...[
+                      const SizedBox(height: 8),
                       Card(
+                        color: Colors.teal.shade50,
                         child: ListTile(
-                          title: Text(_selectedBankName ??
+                          leading:
+                          Icon(Icons.inventory_2, color: Colors.teal),
+                          title: Text(_selectedReturnItemName ??
                               (languageProvider.isEnglish
-                                  ? 'Select Bank'
-                                  : 'بینک منتخب کریں')),
+                                  ? 'Select Item'
+                                  : 'آئٹم منتخب کریں')),
                           trailing: const Icon(Icons.arrow_drop_down),
                           onTap: () async {
-                            final selectedBank = await _selectBank(context);
-                            if (selectedBank != null) {
+                            final item = await _selectReturnItem(context);
+                            if (item != null) {
                               setState(() {
-                                _selectedBankId = selectedBank['id'];
-                                _selectedBankName = selectedBank['name'];
+                                _selectedReturnItemId = item['id'];
+                                _selectedReturnItemName = item['itemName'];
+                                _returnRateController.text =
+                                    (item['avgSalePricePerKg'] as double)
+                                        .toStringAsFixed(2);
                               });
                             }
                           },
                         ),
                       ),
-                    ],
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _paymentAmountController,
-                      keyboardType: TextInputType.number,
-                      decoration: InputDecoration(
-                        labelText: languageProvider.isEnglish
-                            ? 'Payment Amount'
-                            : 'ادائیگی کی رقم',
-                        border: const OutlineInputBorder(),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _returnQtyController,
+                              keyboardType: TextInputType.number,
+                              decoration: InputDecoration(
+                                labelText: languageProvider.isEnglish
+                                    ? 'Qty'
+                                    : 'مقدار',
+                                border: const OutlineInputBorder(),
+                              ),
+                              onChanged: (_) => setState(() {}),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextField(
+                              controller: _returnRateController,
+                              keyboardType: TextInputType.number,
+                              decoration: InputDecoration(
+                                labelText: languageProvider.isEnglish
+                                    ? 'Rate'
+                                    : 'ریٹ',
+                                border: const OutlineInputBorder(),
+                              ),
+                              onChanged: (_) => setState(() {}),
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      onChanged: (value) => _paymentDescription = value,
-                      decoration: InputDecoration(
-                        labelText: languageProvider.isEnglish
-                            ? 'Description'
-                            : 'تفصیل',
-                        border: const OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: () async {
-                        final image = await _pickImage(context);
-                        if (image != null)
-                          setState(() => _paymentImage = image);
-                      },
-                      child: Text(languageProvider.isEnglish
-                          ? 'Upload Receipt'
-                          : 'رسید اپ لوڈ کریں'),
-                    ),
-                    if (_paymentImage != null)
+                      const SizedBox(height: 16),
                       Container(
-                        margin: const EdgeInsets.only(top: 16),
-                        height: 100,
-                        width: 100,
-                        child: Image.memory(_paymentImage!),
+                        padding: EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.teal.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.teal.shade200),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              languageProvider.isEnglish
+                                  ? 'Credit Value:'
+                                  : 'کریڈٹ ویلیو:',
+                              style: TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            Text(
+                              'Rs. ${_returnItemTotal.toStringAsFixed(2)}',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.teal.shade800,
+                                  fontSize: 16),
+                            ),
+                          ],
+                        ),
                       ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        onChanged: (value) => _paymentDescription = value,
+                        decoration: InputDecoration(
+                          labelText: languageProvider.isEnglish
+                              ? 'Description (optional)'
+                              : 'تفصیل (اختیاری)',
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -862,33 +1189,510 @@ class _CustomerListState extends State<CustomerList> {
                       ? 'Cancel'
                       : 'منسوخ کریں'),
                 ),
+                // ElevatedButton(
+                //   onPressed: _isRecordingPayment
+                //       ? null
+                //       : () async {
+                //     setState(() => _isRecordingPayment = true);
+                //
+                //     // ============================================
+                //     // BRANCH: ITEM RETURN
+                //     // ============================================
+                //     if (_receiveMode == 'ItemReturn') {
+                //       if (_selectedReturnItemId == null) {
+                //         ScaffoldMessenger.of(context).showSnackBar(
+                //             SnackBar(
+                //                 content: Text(languageProvider
+                //                     .isEnglish
+                //                     ? 'Please select an item'
+                //                     : 'براہ کرم آئٹم منتخب کریں')));
+                //         setState(() => _isRecordingPayment = false);
+                //         return;
+                //       }
+                //       final qty =
+                //       double.tryParse(_returnQtyController.text);
+                //       final rate =
+                //       double.tryParse(_returnRateController.text);
+                //       if (qty == null || qty <= 0) {
+                //         ScaffoldMessenger.of(context).showSnackBar(
+                //             SnackBar(
+                //                 content: Text(languageProvider
+                //                     .isEnglish
+                //                     ? 'Please enter a valid quantity'
+                //                     : 'براہ کرم درست مقدار درج کریں')));
+                //         setState(() => _isRecordingPayment = false);
+                //         return;
+                //       }
+                //       if (rate == null || rate <= 0) {
+                //         ScaffoldMessenger.of(context).showSnackBar(
+                //             SnackBar(
+                //                 content: Text(languageProvider
+                //                     .isEnglish
+                //                     ? 'Please enter a valid rate'
+                //                     : 'براہ کرم درست ریٹ درج کریں')));
+                //         setState(() => _isRecordingPayment = false);
+                //         return;
+                //       }
+                //
+                //       final creditValue = qty * rate;
+                //
+                //       try {
+                //         // 1. Ledger entry — acts like a payment
+                //         //    (debitAmount reduces customer balance)
+                //         await filledProvider.updateCustomerLedger(
+                //           customer.id,
+                //           creditAmount: 0.0,
+                //           debitAmount: creditValue,
+                //           remainingBalance:
+                //           (_customerBalances[customer.id] ?? 0.0) -
+                //               creditValue,
+                //           filledNumber: DateTime.now()
+                //               .millisecondsSinceEpoch
+                //               .toString(),
+                //           referenceNumber: 'Item Return',
+                //           transactionDate: _selectedPaymentDate,
+                //           paymentMethod: 'Item Return',
+                //           description: _paymentDescription ??
+                //               'Item return: $_selectedReturnItemName x$qty @ $rate',
+                //           chequeNumber: null,
+                //           bankId: null,
+                //           bankName: null,
+                //         );
+                //
+                //         // 2. Record extra return-specific details in the
+                //         //    same ledger entry (item name/qty/rate) so
+                //         //    payment history can display them.
+                //         final ledgerQuery = await _db
+                //             .child('filledledger')
+                //             .child(customer.id)
+                //             .orderByChild('referenceNumber')
+                //             .equalTo('Item Return')
+                //             .limitToLast(1)
+                //             .get();
+                //         if (ledgerQuery.exists) {
+                //           final entries = ledgerQuery.value
+                //           as Map<dynamic, dynamic>;
+                //           final entryKey = entries.keys.last;
+                //           await _db
+                //               .child('filledledger')
+                //               .child(customer.id)
+                //               .child(entryKey)
+                //               .update({
+                //             'itemName': _selectedReturnItemName,
+                //             'itemQty': qty,
+                //             'itemRate': rate,
+                //           });
+                //         }
+                //
+                //         // 3. Restore stock (qtyOnHand)
+                //         final itemRef = _db
+                //             .child('items')
+                //             .child(_selectedReturnItemId!);
+                //         final itemSnap = await itemRef.get();
+                //         if (itemSnap.exists) {
+                //           final currentQty = ((itemSnap.value
+                //           as Map)['qtyOnHand'] as num?)
+                //               ?.toDouble() ??
+                //               0.0;
+                //           await itemRef.update({
+                //             'qtyOnHand': currentQty + qty,
+                //           });
+                //         }
+                //
+                //         setState(() {
+                //           _customerBalances[customer.id] =
+                //               (_customerBalances[customer.id] ?? 0.0) -
+                //                   creditValue;
+                //         });
+                //
+                //         Navigator.pop(context);
+                //         ScaffoldMessenger.of(context)
+                //             .showSnackBar(SnackBar(
+                //           content: Text(languageProvider.isEnglish
+                //               ? 'Item return of Rs. ${creditValue.toStringAsFixed(2)} recorded successfully'
+                //               : 'آئٹم واپسی $creditValue روپے کامیابی سے ریکارڈ ہو گئی'),
+                //           backgroundColor: Colors.green,
+                //         ));
+                //       } catch (e) {
+                //         ScaffoldMessenger.of(context).showSnackBar(
+                //             SnackBar(
+                //                 content:
+                //                 Text('Error: ${e.toString()}')));
+                //       } finally {
+                //         if (mounted)
+                //           setState(
+                //                   () => _isRecordingPayment = false);
+                //       }
+                //       return;
+                //     }
+                //
+                //     // ============================================
+                //     // BRANCH: CASH PAYMENT (original logic, unchanged)
+                //     // ============================================
+                //     if (_selectedPaymentMethod == null) {
+                //       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                //           content: Text(languageProvider.isEnglish
+                //               ? 'Please select a payment method'
+                //               : 'براہ کرم ادائیگی کا طریقہ منتخب کریں')));
+                //       setState(() => _isRecordingPayment = false);
+                //       return;
+                //     }
+                //     final amount = double.tryParse(
+                //         _paymentAmountController.text);
+                //     if (amount == null || amount <= 0) {
+                //       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                //           content: Text(languageProvider.isEnglish
+                //               ? 'Please enter a valid amount'
+                //               : 'براہ کرم درست رقم درج کریں')));
+                //       setState(() => _isRecordingPayment = false);
+                //       return;
+                //     }
+                //     try {
+                //       final filledNumber = DateTime.now()
+                //           .millisecondsSinceEpoch
+                //           .toString();
+                //       await filledProvider.updateCustomerLedger(
+                //         customer.id,
+                //         creditAmount: 0.0,
+                //         debitAmount: amount,
+                //         remainingBalance:
+                //         (_customerBalances[customer.id] ?? 0.0) -
+                //             amount,
+                //         filledNumber: filledNumber,
+                //         referenceNumber: 'Direct Payment',
+                //         transactionDate: _selectedPaymentDate,
+                //         paymentMethod: _selectedPaymentMethod,
+                //         bankId: _selectedPaymentMethod == 'Bank'
+                //             ? _selectedBankId
+                //             : (_selectedPaymentMethod == 'Cheque'
+                //             ? _selectedBankId
+                //             : null),
+                //         bankName: _selectedPaymentMethod == 'Bank'
+                //             ? _selectedBankName
+                //             : (_selectedPaymentMethod == 'Cheque'
+                //             ? _selectedBankName
+                //             : null),
+                //         chequeNumber:
+                //         _selectedPaymentMethod == 'Cheque'
+                //             ? _chequeNumberController.text
+                //             : null,
+                //         description: _paymentDescription ??
+                //             'Payment from ${customer.name}',
+                //       );
+                //       if (_selectedPaymentMethod == 'Cash') {
+                //         await filledProvider.addCashBookEntry(
+                //           description: _paymentDescription ??
+                //               'Payment from ${customer.name}',
+                //           amount: amount,
+                //           dateTime: _selectedPaymentDate,
+                //           type: 'cash_in',
+                //         );
+                //       } else if (_selectedPaymentMethod == 'Cheque') {
+                //         if (_selectedBankId == null ||
+                //             _selectedBankName == null)
+                //           throw Exception(
+                //               "Bank not selected for cheque payment");
+                //         if (_chequeNumberController.text.isEmpty)
+                //           throw Exception("Cheque number is required");
+                //         if (_selectedChequeDate == null)
+                //           throw Exception("Cheque date is required");
+                //         await _db
+                //             .child(
+                //             'banks/${_selectedBankId}/cheques')
+                //             .push()
+                //             .set({
+                //           'customerId': customer.id,
+                //           'customerName': customer.name,
+                //           'amount': amount,
+                //           'chequeNumber':
+                //           _chequeNumberController.text,
+                //           'chequeDate':
+                //           _selectedChequeDate!.toIso8601String(),
+                //           'status': 'pending',
+                //           'createdAt':
+                //           _selectedPaymentDate.toIso8601String(),
+                //           'bankName': _selectedBankName,
+                //         });
+                //       } else if (_selectedPaymentMethod == 'Bank' &&
+                //           _selectedBankId != null) {
+                //         await _db
+                //             .child(
+                //             'banks/${_selectedBankId}/transactions')
+                //             .push()
+                //             .set({
+                //           'amount': amount,
+                //           'description': _paymentDescription ??
+                //               'Payment from ${customer.name}',
+                //           'type': 'cash_in',
+                //           'timestamp': _selectedPaymentDate
+                //               .millisecondsSinceEpoch,
+                //           'customerId': customer.id,
+                //           'bankName': _selectedBankName,
+                //           'createdAt':
+                //           _selectedPaymentDate.toIso8601String(),
+                //         });
+                //         final bankBalanceRef = _db.child(
+                //             'banks/${_selectedBankId}/balance');
+                //         final currentBalance =
+                //             (await bankBalanceRef.get()).value
+                //             as num? ??
+                //                 0.0;
+                //         await bankBalanceRef
+                //             .set(currentBalance + amount);
+                //       }
+                //       setState(() {
+                //         _customerBalances[customer.id] =
+                //             (_customerBalances[customer.id] ?? 0.0) -
+                //                 amount;
+                //       });
+                //       Navigator.pop(context);
+                //       ScaffoldMessenger.of(context)
+                //           .showSnackBar(SnackBar(
+                //         content: Text(languageProvider.isEnglish
+                //             ? 'Payment of Rs. $amount recorded successfully'
+                //             : 'ادائیگی کی رقم $amount کامیابی سے ریکارڈ ہو گئی'),
+                //       ));
+                //     } catch (e) {
+                //
+                //       ScaffoldMessenger.of(context).showSnackBar(
+                //           SnackBar(
+                //               content:
+                //               Text('Error: ${e.toString()}')));
+                //     } finally {
+                //       if (mounted)
+                //         setState(() => _isRecordingPayment = false);
+                //     }
+                //   },
+                //   child: _isRecordingPayment
+                //       ? SizedBox(
+                //       height: 20,
+                //       width: 20,
+                //       child: CircularProgressIndicator(
+                //           strokeWidth: 2,
+                //           valueColor: AlwaysStoppedAnimation<Color>(
+                //               Colors.white)))
+                //       : Text(_receiveMode == 'ItemReturn'
+                //       ? (languageProvider.isEnglish
+                //       ? 'Record Return'
+                //       : 'واپسی ریکارڈ کریں')
+                //       : (languageProvider.isEnglish
+                //       ? 'Record Payment'
+                //       : 'ادائیگی ریکارڈ کریں')),
+                // ),
                 ElevatedButton(
                   onPressed: _isRecordingPayment
                       ? null
                       : () async {
+                    print('🔵 [DEBUG] Button pressed - _isRecordingPayment set to true');
                     setState(() => _isRecordingPayment = true);
+
+                    // ============================================
+                    // BRANCH: ITEM RETURN
+                    // ============================================
+                    if (_receiveMode == 'ItemReturn') {
+                      print('🟢 [DEBUG] Entering ITEM RETURN branch');
+                      print('📦 [DEBUG] _selectedReturnItemId: $_selectedReturnItemId');
+
+                      if (_selectedReturnItemId == null) {
+                        print('❌ [DEBUG] No item selected - showing error');
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                                content: Text(languageProvider
+                                    .isEnglish
+                                    ? 'Please select an item'
+                                    : 'براہ کرم آئٹم منتخب کریں')));
+                        setState(() => _isRecordingPayment = false);
+                        print('🔴 [DEBUG] _isRecordingPayment reset to false (no item)');
+                        return;
+                      }
+
+                      final qty = double.tryParse(_returnQtyController.text);
+                      final rate = double.tryParse(_returnRateController.text);
+                      print('📊 [DEBUG] Qty: $qty, Rate: $rate');
+
+                      if (qty == null || qty <= 0) {
+                        print('❌ [DEBUG] Invalid quantity: $qty');
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                                content: Text(languageProvider
+                                    .isEnglish
+                                    ? 'Please enter a valid quantity'
+                                    : 'براہ کرم درست مقدار درج کریں')));
+                        setState(() => _isRecordingPayment = false);
+                        print('🔴 [DEBUG] _isRecordingPayment reset to false (invalid qty)');
+                        return;
+                      }
+                      if (rate == null || rate <= 0) {
+                        print('❌ [DEBUG] Invalid rate: $rate');
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                                content: Text(languageProvider
+                                    .isEnglish
+                                    ? 'Please enter a valid rate'
+                                    : 'براہ کرم درست ریٹ درج کریں')));
+                        setState(() => _isRecordingPayment = false);
+                        print('🔴 [DEBUG] _isRecordingPayment reset to false (invalid rate)');
+                        return;
+                      }
+
+                      final creditValue = qty * rate;
+                      print('💰 [DEBUG] Credit value calculated: $creditValue (qty: $qty × rate: $rate)');
+                      print('👤 [DEBUG] Customer ID: ${customer.id}, Current balance: ${_customerBalances[customer.id] ?? 0.0}');
+
+                      try {
+                        print('📝 [DEBUG] STEP 1: Updating customer ledger...');
+                        await filledProvider.updateCustomerLedger(
+                          customer.id,
+                          creditAmount: 0.0,
+                          debitAmount: creditValue,
+                          remainingBalance:
+                          (_customerBalances[customer.id] ?? 0.0) -
+                              creditValue,
+                          filledNumber: DateTime.now()
+                              .millisecondsSinceEpoch
+                              .toString(),
+                          referenceNumber: 'Item Return',
+                          transactionDate: _selectedPaymentDate,
+                          paymentMethod: 'Item Return',
+                          description: _paymentDescription ??
+                              'Item return: $_selectedReturnItemName x$qty @ $rate',
+                          chequeNumber: null,
+                          bankId: null,
+                          bankName: null,
+                        );
+                        print('✅ [DEBUG] Ledger update complete');
+
+                        // 2. Record extra return-specific details
+                        print('📝 [DEBUG] STEP 2: Adding return details to ledger entry...');
+
+// Get ALL entries for this customer (no orderBy)
+                        final ledgerSnap = await _db
+                            .child('filledledger')
+                            .child(customer.id)
+                            .get();
+
+                        if (ledgerSnap.exists) {
+                          final entries = ledgerSnap.value as Map<dynamic, dynamic>?;
+                          if (entries != null && entries.isNotEmpty) {
+                            // Get the last entry key (most recently added)
+                            final entryKeys = entries.keys.toList();
+                            final lastKey = entryKeys.last;
+
+                            print('🔑 [DEBUG] Last entry key: $lastKey');
+                            await _db
+                                .child('filledledger')
+                                .child(customer.id)
+                                .child(lastKey)
+                                .update({
+                              'itemName': _selectedReturnItemName,
+                              'itemQty': qty,
+                              'itemRate': rate,
+                            });
+                            print('✅ [DEBUG] Return details added successfully');
+                          } else {
+                            print('⚠️ [DEBUG] No entries found in ledger');
+                          }
+                        } else {
+                          print('⚠️ [DEBUG] No ledger data found for customer');
+                        }
+
+                        // 3. Restore stock (qtyOnHand)
+                        print('📝 [DEBUG] STEP 3: Updating stock quantity...');
+                        final itemRef = _db
+                            .child('items')
+                            .child(_selectedReturnItemId!);
+                        final itemSnap = await itemRef.get();
+                        print('🔍 [DEBUG] Item snapshot exists: ${itemSnap.exists}');
+
+                        if (itemSnap.exists) {
+                          final currentQty = ((itemSnap.value as Map)['qtyOnHand'] as num?)
+                              ?.toDouble() ?? 0.0;
+                          final newQty = currentQty + qty;
+                          print('📦 [DEBUG] Stock update: $currentQty → $newQty (+$qty)');
+                          await itemRef.update({
+                            'qtyOnHand': newQty,
+                          });
+                          print('✅ [DEBUG] Stock updated successfully');
+                        } else {
+                          print('⚠️ [DEBUG] Item not found in database: ${_selectedReturnItemId}');
+                        }
+
+                        print('📝 [DEBUG] STEP 4: Updating local customer balance...');
+                        setState(() {
+                          _customerBalances[customer.id] =
+                              (_customerBalances[customer.id] ?? 0.0) -
+                                  creditValue;
+                        });
+                        print('💰 [DEBUG] New balance: ${_customerBalances[customer.id]}');
+
+                        print('✅ [DEBUG] All steps complete - closing dialog');
+                        Navigator.pop(context);
+                        ScaffoldMessenger.of(context)
+                            .showSnackBar(SnackBar(
+                          content: Text(languageProvider.isEnglish
+                              ? 'Item return of Rs. ${creditValue.toStringAsFixed(2)} recorded successfully'
+                              : 'آئٹم واپسی $creditValue روپے کامیابی سے ریکارڈ ہو گئی'),
+                          backgroundColor: Colors.green,
+                        ));
+                        print('🎉 [DEBUG] Item return completed successfully!');
+
+                      } catch (e) {
+                        print('❌ [ERROR] Exception occurred: ${e.toString()}');
+                        print('📋 [ERROR] Stack trace: ${StackTrace.current}');
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                                content:
+                                Text('Error: ${e.toString()}')));
+                      } finally {
+                        if (mounted) {
+                          setState(() => _isRecordingPayment = false);
+                          print('🔴 [DEBUG] _isRecordingPayment reset to false (finally block)');
+                        }
+                      }
+                      return;
+                    }
+
+                    // ============================================
+                    // BRANCH: CASH PAYMENT (original logic, unchanged)
+                    // ============================================
+                    print('🟢 [DEBUG] Entering CASH PAYMENT branch');
+                    print('💳 [DEBUG] Selected payment method: $_selectedPaymentMethod');
+
                     if (_selectedPaymentMethod == null) {
+                      print('❌ [DEBUG] No payment method selected');
                       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                           content: Text(languageProvider.isEnglish
                               ? 'Please select a payment method'
                               : 'براہ کرم ادائیگی کا طریقہ منتخب کریں')));
                       setState(() => _isRecordingPayment = false);
+                      print('🔴 [DEBUG] _isRecordingPayment reset to false (no payment method)');
                       return;
                     }
+
                     final amount = double.tryParse(
                         _paymentAmountController.text);
+                    print('💵 [DEBUG] Payment amount: $amount');
+
                     if (amount == null || amount <= 0) {
+                      print('❌ [DEBUG] Invalid amount: $amount');
                       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                           content: Text(languageProvider.isEnglish
                               ? 'Please enter a valid amount'
                               : 'براہ کرم درست رقم درج کریں')));
                       setState(() => _isRecordingPayment = false);
+                      print('🔴 [DEBUG] _isRecordingPayment reset to false (invalid amount)');
                       return;
                     }
+
+                    print('👤 [DEBUG] Customer ID: ${customer.id}, Current balance: ${_customerBalances[customer.id] ?? 0.0}');
+
                     try {
                       final filledNumber = DateTime.now()
                           .millisecondsSinceEpoch
                           .toString();
+                      print('📝 [DEBUG] Generated filledNumber: $filledNumber');
+
+                      print('📝 [DEBUG] STEP 1: Updating customer ledger...');
                       await filledProvider.updateCustomerLedger(
                         customer.id,
                         creditAmount: 0.0,
@@ -917,7 +1721,10 @@ class _CustomerListState extends State<CustomerList> {
                         description: _paymentDescription ??
                             'Payment from ${customer.name}',
                       );
+                      print('✅ [DEBUG] Ledger update complete');
+
                       if (_selectedPaymentMethod == 'Cash') {
+                        print('💵 [DEBUG] STEP 2a: Adding cash book entry...');
                         await filledProvider.addCashBookEntry(
                           description: _paymentDescription ??
                               'Payment from ${customer.name}',
@@ -925,18 +1732,31 @@ class _CustomerListState extends State<CustomerList> {
                           dateTime: _selectedPaymentDate,
                           type: 'cash_in',
                         );
+                        print('✅ [DEBUG] Cash book entry added');
+
                       } else if (_selectedPaymentMethod == 'Cheque') {
+                        print('📝 [DEBUG] STEP 2b: Processing Cheque payment...');
+                        print('🏦 [DEBUG] Bank ID: $_selectedBankId, Bank Name: $_selectedBankName');
+                        print('📄 [DEBUG] Cheque Number: ${_chequeNumberController.text}');
+                        print('📅 [DEBUG] Cheque Date: $_selectedChequeDate');
+
                         if (_selectedBankId == null ||
-                            _selectedBankName == null)
-                          throw Exception(
-                              "Bank not selected for cheque payment");
-                        if (_chequeNumberController.text.isEmpty)
+                            _selectedBankName == null) {
+                          print('❌ [ERROR] Bank not selected for cheque payment');
+                          throw Exception("Bank not selected for cheque payment");
+                        }
+                        if (_chequeNumberController.text.isEmpty) {
+                          print('❌ [ERROR] Cheque number is required');
                           throw Exception("Cheque number is required");
-                        if (_selectedChequeDate == null)
+                        }
+                        if (_selectedChequeDate == null) {
+                          print('❌ [ERROR] Cheque date is required');
                           throw Exception("Cheque date is required");
+                        }
+
+                        print('📝 [DEBUG] Saving cheque to database...');
                         await _db
-                            .child(
-                            'banks/${_selectedBankId}/cheques')
+                            .child('banks/${_selectedBankId}/cheques')
                             .push()
                             .set({
                           'customerId': customer.id,
@@ -951,11 +1771,14 @@ class _CustomerListState extends State<CustomerList> {
                           _selectedPaymentDate.toIso8601String(),
                           'bankName': _selectedBankName,
                         });
+                        print('✅ [DEBUG] Cheque saved successfully');
+
                       } else if (_selectedPaymentMethod == 'Bank' &&
                           _selectedBankId != null) {
+                        print('🏦 [DEBUG] STEP 2c: Processing Bank payment...');
+                        print('📝 [DEBUG] Saving bank transaction...');
                         await _db
-                            .child(
-                            'banks/${_selectedBankId}/transactions')
+                            .child('banks/${_selectedBankId}/transactions')
                             .push()
                             .set({
                           'amount': amount,
@@ -969,19 +1792,28 @@ class _CustomerListState extends State<CustomerList> {
                           'createdAt':
                           _selectedPaymentDate.toIso8601String(),
                         });
+                        print('✅ [DEBUG] Bank transaction saved');
+
+                        print('📝 [DEBUG] Updating bank balance...');
                         final bankBalanceRef = _db.child(
                             'banks/${_selectedBankId}/balance');
                         final currentBalance =
-                            (await bankBalanceRef.get()).value as num? ??
-                                0.0;
-                        await bankBalanceRef
-                            .set(currentBalance + amount);
+                            (await bankBalanceRef.get()).value as num? ?? 0.0;
+                        final newBalance = currentBalance + amount;
+                        print('🏦 [DEBUG] Bank balance: $currentBalance → $newBalance (+$amount)');
+                        await bankBalanceRef.set(newBalance);
+                        print('✅ [DEBUG] Bank balance updated');
                       }
+
+                      print('📝 [DEBUG] STEP 3: Updating local customer balance...');
                       setState(() {
                         _customerBalances[customer.id] =
                             (_customerBalances[customer.id] ?? 0.0) -
                                 amount;
                       });
+                      print('💰 [DEBUG] New balance: ${_customerBalances[customer.id]}');
+
+                      print('✅ [DEBUG] All steps complete - closing dialog');
                       Navigator.pop(context);
                       ScaffoldMessenger.of(context)
                           .showSnackBar(SnackBar(
@@ -989,14 +1821,20 @@ class _CustomerListState extends State<CustomerList> {
                             ? 'Payment of Rs. $amount recorded successfully'
                             : 'ادائیگی کی رقم $amount کامیابی سے ریکارڈ ہو گئی'),
                       ));
+                      print('🎉 [DEBUG] Payment completed successfully!');
+
                     } catch (e) {
+                      print('❌ [ERROR] Exception occurred: ${e.toString()}');
+                      print('📋 [ERROR] Stack trace: ${StackTrace.current}');
                       ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
                               content:
                               Text('Error: ${e.toString()}')));
                     } finally {
-                      if (mounted)
+                      if (mounted) {
                         setState(() => _isRecordingPayment = false);
+                        print('🔴 [DEBUG] _isRecordingPayment reset to false (finally block)');
+                      }
                     }
                   },
                   child: _isRecordingPayment
@@ -1007,9 +1845,13 @@ class _CustomerListState extends State<CustomerList> {
                           strokeWidth: 2,
                           valueColor: AlwaysStoppedAnimation<Color>(
                               Colors.white)))
-                      : Text(languageProvider.isEnglish
+                      : Text(_receiveMode == 'ItemReturn'
+                      ? (languageProvider.isEnglish
+                      ? 'Record Return'
+                      : 'واپسی ریکارڈ کریں')
+                      : (languageProvider.isEnglish
                       ? 'Record Payment'
-                      : 'ادائیگی ریکارڈ کریں'),
+                      : 'ادائیگی ریکارڈ کریں')),
                 ),
               ],
             );
