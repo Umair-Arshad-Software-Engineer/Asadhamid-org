@@ -3,7 +3,8 @@
 import 'package:mughal_group_branch_two/Auth/login.dart';
 import 'package:mughal_group_branch_two/Auth/register.dart';
   import 'package:provider/provider.dart';
-  import 'Provider/bankprovider.dart';
+  import 'Provider/Mazdoorprovider ·.dart';
+import 'Provider/bankprovider.dart';
   import 'Provider/customerprovider.dart';
   import 'Provider/employeeprovider.dart';
   import 'Provider/expenseprovider.dart';
@@ -42,6 +43,7 @@ import 'Provider/reportprovider.dart';
           ChangeNotifierProvider(create: (_) => CustomerReportProvider()),
           ChangeNotifierProvider(create: (_) => ItemsWiseLedgerProvider()),
           ChangeNotifierProvider(create: (_) => QuoteProvider()),
+          ChangeNotifierProvider(create: (_) => MazdoorProvider()),
         ],
         child: const MyApp(),
       ),

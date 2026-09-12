@@ -18,6 +18,7 @@ import 'Filled/filledlist.dart';
 import 'Filled/gatepasslist.dart';
 import 'Filled/quotelist.dart';
 import 'Filled/quotepage.dart';
+import 'Mazdoori/Mazdoorlistpage.dart';
 import 'NewEmployee/employeemainpage.dart';
 import 'Purchase/Purchase Order page.dart';
 import 'Purchase/purchaseorderlist.dart';
@@ -263,6 +264,7 @@ class _DashboardState extends State<Dashboard> {
       {'icon': Icons.receipt_long, 'titleEn': 'Gate Pass', 'titleUr': 'گیٹ پاس', 'color': const Color(0xFF8B5CF6), 'page': QuotationListPage()},
       {'icon': Icons.inventory_2, 'titleEn': 'Quotations', 'titleUr': 'Quotations', 'color': const Color(0xFFF59E0B), 'page': QuoteListPageOrg()},
       {'icon': Icons.inventory_2, 'titleEn': 'Invoice', 'titleUr': 'انوائس اندراج', 'color': const Color(0xFFF59E0B), 'page': filledListpage()},
+      {'icon': Icons.inventory_2, 'titleEn': 'Mazdoori', 'titleUr': 'مزدوری', 'color': const Color(0xFFF59E0B), 'page': MazdoorListPage()},
       {'icon': Icons.money_off, 'titleEn': 'Expenses', 'titleUr': 'اخراجات', 'color': const Color(0xFFEF4444), 'page': ViewExpensesPage()},
       {'icon': Icons.engineering, 'titleEn': 'Employee', 'titleUr': 'ورکر', 'color': const Color(0xFF10B981), 'page': HomeScreen()},
       {'icon': Icons.groups, 'titleEn': 'Customers', 'titleUr': 'کسٹمرز', 'color': const Color(0xFF3B82F6), 'page': CustomerList()},
