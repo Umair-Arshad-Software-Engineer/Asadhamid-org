@@ -1479,12 +1479,12 @@ class _filledpageState extends State<filledpage> {
                   pw.Column(
                     children: [
                       pw.Text(
-                        'Developed By: Tech Soft',
+                        'Product by: Swittix Technologies',
                         style: pw.TextStyle(
                             fontSize: 12, fontWeight: pw.FontWeight.bold),
                       ),
                       pw.Text(
-                        '0341-6426617',
+                        'www.swittix.com',
                         style: pw.TextStyle(
                             fontSize: 12, fontWeight: pw.FontWeight.bold),
                       ),

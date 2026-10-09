@@ -7,7 +7,6 @@ import '../Provider/Mazdoorprovider ·.dart';
 import '../Provider/lanprovider.dart';
 import 'mazdorijob.dart';
 
-
 class MazdoorLedgerPage extends StatefulWidget {
   final String mazdoorId;
   final String mazdoorName;
@@ -49,8 +48,14 @@ class _MazdoorLedgerPageState extends State<MazdoorLedgerPage> {
     switch (type) {
       case 'wire_given':
         return Icons.outbond;
+      case 'bolt_given':
+        return Icons.settings_input_component;
+      case 'cash_given':
+        return Icons.payments;
       case 'bolt_return':
         return Icons.settings_input_component;
+      case 'wire_return':
+        return Icons.assignment_return;
       case 'cash_payment':
         return Icons.payments;
       case 'opening_balance':
@@ -64,8 +69,14 @@ class _MazdoorLedgerPageState extends State<MazdoorLedgerPage> {
     switch (type) {
       case 'wire_given':
         return lp.isEnglish ? 'Wire Given' : 'وائر دیا گیا';
+      case 'bolt_given':
+        return lp.isEnglish ? 'Bolts Given' : 'بولٹس دیے گئے';
+      case 'cash_given':
+        return lp.isEnglish ? 'Cash Given' : 'نقد دیا گیا';
       case 'bolt_return':
         return lp.isEnglish ? 'Bolts Returned' : 'بولٹس واپس';
+      case 'wire_return':
+        return lp.isEnglish ? 'Wire Returned' : 'وائر واپس';
       case 'cash_payment':
         return lp.isEnglish ? 'Cash Payment' : 'نقد ادائیگی';
       case 'opening_balance':
@@ -174,10 +185,16 @@ class _MazdoorLedgerPageState extends State<MazdoorLedgerPage> {
               children: [
                 Text(
                   owesYou
-                      ? (lp.isEnglish ? 'Owes You' : 'آپ کا مقروض ہے')
+                      ? (lp.isEnglish
+                      ? 'Owes You'
+                      : 'آپ کا مقروض ہے')
                       : youOwe
-                      ? (lp.isEnglish ? 'You Owe' : 'آپ مقروض ہیں')
-                      : (lp.isEnglish ? 'Settled' : 'حساب برابر'),
+                      ? (lp.isEnglish
+                      ? 'You Owe'
+                      : 'آپ مقروض ہیں')
+                      : (lp.isEnglish
+                      ? 'Settled'
+                      : 'حساب برابر'),
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     color: owesYou
@@ -207,7 +224,9 @@ class _MazdoorLedgerPageState extends State<MazdoorLedgerPage> {
             child: _entries.isEmpty
                 ? Center(
               child: Text(
-                lp.isEnglish ? 'No transactions yet' : 'ابھی تک کوئی لین دین نہیں',
+                lp.isEnglish
+                    ? 'No transactions yet'
+                    : 'ابھی تک کوئی لین دین نہیں',
                 style: TextStyle(color: Colors.grey[600]),
               ),
             )
@@ -215,23 +234,29 @@ class _MazdoorLedgerPageState extends State<MazdoorLedgerPage> {
               itemCount: _entries.length,
               itemBuilder: (context, index) {
                 final entry = _entries[index];
-                final isDebit = entry.debitFromMazdoor > 0;
+                final isDebit =
+                    entry.debitFromMazdoor > 0;
                 return Card(
-                  margin:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  margin: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 4),
                   child: ListTile(
                     leading: CircleAvatar(
-                      backgroundColor:
-                      isDebit ? Colors.orange[100] : Colors.teal[100],
+                      backgroundColor: isDebit
+                          ? Colors.orange[100]
+                          : Colors.teal[100],
                       child: Icon(
                         _iconFor(entry.entryType),
-                        color: isDebit ? Colors.orange[800] : Colors.teal[800],
+                        color: isDebit
+                            ? Colors.orange[800]
+                            : Colors.teal[800],
                         size: 20,
                       ),
                     ),
-                    title: Text(_labelFor(entry.entryType, lp)),
+                    title: Text(
+                        _labelFor(entry.entryType, lp)),
                     subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      crossAxisAlignment:
+                      CrossAxisAlignment.start,
                       children: [
                         if (entry.itemName != null)
                           Text(
@@ -239,7 +264,9 @@ class _MazdoorLedgerPageState extends State<MazdoorLedgerPage> {
                         if (entry.description != null &&
                             entry.description!.isNotEmpty)
                           Text(entry.description!,
-                              style: const TextStyle(fontStyle: FontStyle.italic)),
+                              style: const TextStyle(
+                                  fontStyle:
+                                  FontStyle.italic)),
                         Text(
                           DateFormat('yyyy-MM-dd – HH:mm')
                               .format(entry.createdAt),
@@ -248,8 +275,10 @@ class _MazdoorLedgerPageState extends State<MazdoorLedgerPage> {
                       ],
                     ),
                     trailing: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.end,
+                      mainAxisAlignment:
+                      MainAxisAlignment.center,
+                      crossAxisAlignment:
+                      CrossAxisAlignment.end,
                       children: [
                         Text(
                           isDebit
@@ -257,12 +286,16 @@ class _MazdoorLedgerPageState extends State<MazdoorLedgerPage> {
                               : '-${entry.creditToMazdoor.toStringAsFixed(2)}',
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
-                            color: isDebit ? Colors.orange[800] : Colors.teal[800],
+                            color: isDebit
+                                ? Colors.orange[800]
+                                : Colors.teal[800],
                           ),
                         ),
                         Text(
                           'Bal: ${entry.remainingBalance.toStringAsFixed(2)}',
-                          style: const TextStyle(fontSize: 11, color: Colors.grey),
+                          style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey),
                         ),
                       ],
                     ),

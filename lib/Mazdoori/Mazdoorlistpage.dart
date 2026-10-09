@@ -8,11 +8,10 @@ import '../Models/mazdoorModel.dart';
 import '../Provider/Mazdoorprovider ·.dart';
 import '../Provider/lanprovider.dart';
 import 'mazdorijob.dart';
-// ── NEW: import the two new ledger pages ──
+// ── Ledger pages ──
 import 'mazdoorLedgerReportPage.dart';
 import 'mazdoorItemWiseLedgerPage.dart';
 import 'mazdoriledger.dart';
-
 
 class MazdoorListPage extends StatefulWidget {
   @override
@@ -155,7 +154,8 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
           // ── Totals strip ──
           if (list.isNotEmpty && !_loadingBalances)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              padding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               child: Row(
                 children: [
                   Expanded(
@@ -262,8 +262,8 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
                     ),
                     trailing: PopupMenuButton<String>(
                       icon: const Icon(Icons.more_vert),
-                      onSelected: (value) =>
-                          _handleMenu(context, value, m, languageProvider),
+                      onSelected: (value) => _handleMenu(
+                          context, value, m, languageProvider),
                       itemBuilder: (context) => [
                         PopupMenuItem(
                           value: 'give_wire',
@@ -272,8 +272,8 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
                                 color: Colors.orange),
                             const SizedBox(width: 8),
                             Text(languageProvider.isEnglish
-                                ? 'Give Wire (New Job)'
-                                : 'وائر دیں (نیا کام)'),
+                                ? 'Give'
+                                : 'دیں'),
                           ]),
                         ),
                         PopupMenuItem(
@@ -283,8 +283,8 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
                                 color: Colors.green),
                             const SizedBox(width: 8),
                             Text(languageProvider.isEnglish
-                                ? 'Receive Bolts / Cash'
-                                : 'بولٹس / نقدی وصول کریں'),
+                                ? 'Receive Bolts / Wire / Cash'
+                                : 'بولٹس / وائر / نقدی وصول کریں'),
                           ]),
                         ),
                         const PopupMenuDivider(),
@@ -325,7 +325,8 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
                         PopupMenuItem(
                           value: 'delete',
                           child: Row(children: [
-                            const Icon(Icons.delete, color: Colors.red),
+                            const Icon(Icons.delete,
+                                color: Colors.red),
                             const SizedBox(width: 8),
                             Text(languageProvider.isEnglish
                                 ? 'Delete'
@@ -335,11 +336,10 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
                       ],
                     ),
                     onTap: () {
-                      // Tapping the tile opens the modal chooser
-                      _showLedgerChooser(context, m, languageProvider);
+                      _showLedgerChooser(
+                          context, m, languageProvider);
                     },
                     onLongPress: () {
-                      // Long-press goes straight to the simple ledger
                       Navigator.push(
                         context,
                         MaterialPageRoute(
@@ -468,7 +468,6 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
         _refresh();
         break;
       case 'ledger':
-      // "Quick Ledger" → the original lightweight ledger page
         await Navigator.push(
           context,
           MaterialPageRoute(
@@ -486,7 +485,7 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
     }
   }
 
-  // ── Bottom sheet to choose which ledger view ──
+  // ── Bottom sheet to choose which ledger view + quick actions ──
   void _showLedgerChooser(
       BuildContext context, MazdoorPerson m, LanguageProvider lp) {
     showModalBottomSheet(
@@ -495,99 +494,180 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.grey[400],
-                borderRadius: BorderRadius.circular(2),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[400],
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Text(
-                m.name,
-                style: const TextStyle(
-                    fontWeight: FontWeight.bold, fontSize: 16),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  m.name,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 16),
+                ),
               ),
-            ),
-            const SizedBox(height: 8),
-            ListTile(
-              leading: const Icon(Icons.receipt_long, color: Colors.teal),
-              title: Text(lp.isEnglish
-                  ? 'Simple Ledger'
-                  : 'سادہ کھاتہ'),
-              subtitle: Text(lp.isEnglish
-                  ? 'Transactions with expandable wire items'
-                  : 'لین دین، وائر آئٹمز کے ساتھ'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => MazdoorLedgerReportPage(
-                      mazdoorId: m.id,
-                      mazdoorName: m.name,
-                      mazdoorPhone: m.phone,
-                      mazdoorAddress: m.address,
-                      mazdoorCity: m.city,
+              const SizedBox(height: 8),
+
+              // ══════════════════════════════════════════════════════
+              // QUICK ACTIONS
+              // ══════════════════════════════════════════════════════
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        icon: const Icon(Icons.outbond,
+                            size: 18, color: Colors.white),
+                        label: Text(
+                          lp.isEnglish ? 'Give' : 'دیں',
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 12),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange[700],
+                          padding:
+                          const EdgeInsets.symmetric(vertical: 10),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8)),
+                        ),
+                        onPressed: () async {
+                          Navigator.pop(context);
+                          await Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => MazdoorJobPage(
+                                mazdoorId: m.id,
+                                mazdoorName: m.name,
+                                mode: MazdoorJobMode.giveWire,
+                              ),
+                            ),
+                          );
+                          _refresh();
+                        },
+                      ),
                     ),
-                  ),
-                ).then((_) => _refresh());
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.list_alt, color: Colors.blue),
-              title: Text(lp.isEnglish
-                  ? 'Item-Wise Ledger'
-                  : 'آئٹم وار کھاتہ'),
-              subtitle: Text(lp.isEnglish
-                  ? 'Every wire / bolt movement as a row'
-                  : 'ہر وائر / بولٹ کی حرکت'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => MazdoorItemsWiseLedgerPage(
-                      mazdoorId: m.id,
-                      mazdoorName: m.name,
-                      mazdoorPhone: m.phone,
-                      mazdoorAddress: m.address,
-                      mazdoorCity: m.city,
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        icon: const Icon(Icons.call_received,
+                            size: 18, color: Colors.white),
+                        label: Text(
+                          lp.isEnglish ? 'Receive' : 'وصول کریں',
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 12),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.teal[400],
+                          padding:
+                          const EdgeInsets.symmetric(vertical: 10),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8)),
+                        ),
+                        onPressed: () async {
+                          Navigator.pop(context);
+                          await Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => MazdoorJobPage(
+                                mazdoorId: m.id,
+                                mazdoorName: m.name,
+                                mode: MazdoorJobMode.receiveReturn,
+                              ),
+                            ),
+                          );
+                          _refresh();
+                        },
+                      ),
                     ),
-                  ),
-                ).then((_) => _refresh());
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.history, color: Colors.teal),
-              title: Text(lp.isEnglish
-                  ? 'Quick Ledger'
-                  : 'فوری کھاتہ'),
-              subtitle: Text(lp.isEnglish
-                  ? 'Original lightweight view'
-                  : 'اصل ہلکا منظر'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => MazdoorLedgerPage(
-                      mazdoorId: m.id,
-                      mazdoorName: m.name,
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 12),
+              const Divider(height: 1),
+
+              // ══════════════════════════════════════════════════════
+              // LEDGER VIEWS
+              // ══════════════════════════════════════════════════════
+              ListTile(
+                leading:
+                const Icon(Icons.receipt_long, color: Colors.teal),
+                title: Text(lp.isEnglish ? 'Simple Ledger' : 'سادہ کھاتہ'),
+                subtitle: Text(lp.isEnglish
+                    ? 'Transactions with expandable wire items'
+                    : 'لین دین، وائر آئٹمز کے ساتھ'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => MazdoorLedgerReportPage(
+                        mazdoorId: m.id,
+                        mazdoorName: m.name,
+                        mazdoorPhone: m.phone,
+                        mazdoorAddress: m.address,
+                        mazdoorCity: m.city,
+                      ),
                     ),
-                  ),
-                ).then((_) => _refresh());
-              },
-            ),
-            const SizedBox(height: 8),
-          ],
+                  ).then((_) => _refresh());
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.list_alt, color: Colors.blue),
+                title:
+                Text(lp.isEnglish ? 'Item-Wise Ledger' : 'آئٹم وار کھاتہ'),
+                subtitle: Text(lp.isEnglish
+                    ? 'Every wire / bolt / cash movement as a row'
+                    : 'ہر وائر / بولٹ / نقد کی حرکت'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => MazdoorItemsWiseLedgerPage(
+                        mazdoorId: m.id,
+                        mazdoorName: m.name,
+                        mazdoorPhone: m.phone,
+                        mazdoorAddress: m.address,
+                        mazdoorCity: m.city,
+                      ),
+                    ),
+                  ).then((_) => _refresh());
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.history, color: Colors.teal),
+                title: Text(lp.isEnglish ? 'Quick Ledger' : 'فوری کھاتہ'),
+                subtitle: Text(lp.isEnglish
+                    ? 'Original lightweight view'
+                    : 'اصل ہلکا منظر'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => MazdoorLedgerPage(
+                        mazdoorId: m.id,
+                        mazdoorName: m.name,
+                      ),
+                    ),
+                  ).then((_) => _refresh());
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
         ),
       ),
     );

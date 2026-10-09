@@ -22,14 +22,7 @@ class _AddVendorPageState extends State<AddVendorPage> {
   final TextEditingController _vendorNameController = TextEditingController();
   final TextEditingController _phoneController = TextEditingController();
   final TextEditingController _addressController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
-  final TextEditingController _contactPersonController = TextEditingController();
   final DatabaseReference _databaseRef = FirebaseDatabase.instance.ref("vendors");
-
-  // Add more fields as needed
-  final TextEditingController _taxIdController = TextEditingController();
-  final TextEditingController _paymentTermsController = TextEditingController();
-  final TextEditingController _notesController = TextEditingController();
 
   String? _vendorId; // For edit mode
 
@@ -51,13 +44,6 @@ class _AddVendorPageState extends State<AddVendorPage> {
       _vendorNameController.text = vendorData['name'] ?? '';
       _phoneController.text = vendorData['phone'] ?? '';
       _addressController.text = vendorData['address'] ?? '';
-      _emailController.text = vendorData['email'] ?? '';
-      _contactPersonController.text = vendorData['contactPerson'] ?? '';
-
-      // Add more fields as needed
-      _taxIdController.text = vendorData['taxId'] ?? '';
-      _paymentTermsController.text = vendorData['paymentTerms'] ?? '';
-      _notesController.text = vendorData['notes'] ?? '';
     });
   }
 
@@ -77,24 +63,17 @@ class _AddVendorPageState extends State<AddVendorPage> {
     }
 
     try {
-      // Create vendor data object
+      // Create vendor data object — only name, phone, address
       Map<String, dynamic> vendorData = {
         "name": vendorName,
         "phone": _phoneController.text.trim(),
         "address": _addressController.text.trim(),
-        "email": _emailController.text.trim(),
-        "contactPerson": _contactPersonController.text.trim(),
-        "taxId": _taxIdController.text.trim(),
-        "paymentTerms": _paymentTermsController.text.trim(),
-        "notes": _notesController.text.trim(),
         "updatedAt": DateTime.now().millisecondsSinceEpoch,
       };
 
       // For new vendor, add created date
       if (!widget.isEditMode) {
         vendorData["createdAt"] = DateTime.now().millisecondsSinceEpoch;
-
-        // Add opening balance if needed (you can add fields for this too)
         vendorData["openingBalance"] = 0.0;
         vendorData["openingBalanceDate"] = DateTime.now().toIso8601String();
       }
@@ -115,7 +94,6 @@ class _AddVendorPageState extends State<AddVendorPage> {
           ),
         );
 
-        // Navigate back
         Navigator.pop(context);
       } else {
         // Add new vendor
@@ -148,11 +126,6 @@ class _AddVendorPageState extends State<AddVendorPage> {
     _vendorNameController.clear();
     _phoneController.clear();
     _addressController.clear();
-    _emailController.clear();
-    _contactPersonController.clear();
-    _taxIdController.clear();
-    _paymentTermsController.clear();
-    _notesController.clear();
   }
 
   @override
@@ -160,11 +133,6 @@ class _AddVendorPageState extends State<AddVendorPage> {
     _vendorNameController.dispose();
     _phoneController.dispose();
     _addressController.dispose();
-    _emailController.dispose();
-    _contactPersonController.dispose();
-    _taxIdController.dispose();
-    _paymentTermsController.dispose();
-    _notesController.dispose();
     super.dispose();
   }
 
@@ -218,48 +186,12 @@ class _AddVendorPageState extends State<AddVendorPage> {
             ),
             const SizedBox(height: 16),
 
-            // Contact Person Field
-            _buildLabel(languageProvider.isEnglish ? 'Contact Person' : 'رابطہ شخص'),
-            _buildTextField(
-              controller: _contactPersonController,
-              hintText: languageProvider.isEnglish ? 'Enter contact person name' : 'رابطہ شخص کا نام درج کریں',
-              keyboardType: TextInputType.text,
-            ),
-            const SizedBox(height: 16),
-
             // Phone Number Field
             _buildLabel(languageProvider.isEnglish ? 'Phone Number' : 'فون نمبر'),
             _buildTextField(
               controller: _phoneController,
               hintText: languageProvider.isEnglish ? 'Enter phone number' : 'فون نمبر درج کریں',
               keyboardType: TextInputType.phone,
-            ),
-            const SizedBox(height: 16),
-
-            // Email Field
-            _buildLabel(languageProvider.isEnglish ? 'Email' : 'ای میل'),
-            _buildTextField(
-              controller: _emailController,
-              hintText: languageProvider.isEnglish ? 'Enter email address' : 'ای میل پتہ درج کریں',
-              keyboardType: TextInputType.emailAddress,
-            ),
-            const SizedBox(height: 16),
-
-            // Tax ID Field
-            _buildLabel(languageProvider.isEnglish ? 'Tax ID / VAT Number' : 'ٹیکس آئی ڈی / وی اے ٹی نمبر'),
-            _buildTextField(
-              controller: _taxIdController,
-              hintText: languageProvider.isEnglish ? 'Enter tax identification number' : 'ٹیکس شناختی نمبر درج کریں',
-              keyboardType: TextInputType.text,
-            ),
-            const SizedBox(height: 16),
-
-            // Payment Terms Field
-            _buildLabel(languageProvider.isEnglish ? 'Payment Terms' : 'ادائیگی کی شرائط'),
-            _buildTextField(
-              controller: _paymentTermsController,
-              hintText: languageProvider.isEnglish ? 'e.g., Net 30, COD' : 'مثلاً، نیٹ 30، سی او ڈی',
-              keyboardType: TextInputType.text,
             ),
             const SizedBox(height: 16),
 
@@ -280,28 +212,6 @@ class _AddVendorPageState extends State<AddVendorPage> {
                   ),
                 ),
                 maxLines: 4,
-                textInputAction: TextInputAction.newline,
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // Notes Field
-            _buildLabel(languageProvider.isEnglish ? 'Notes' : 'نوٹس'),
-            SizedBox(
-              height: 80,
-              child: TextField(
-                controller: _notesController,
-                decoration: InputDecoration(
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8.0),
-                  ),
-                  hintText: languageProvider.isEnglish ? 'Additional notes or comments' : 'اضافی نوٹس یا تبصرے',
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12.0,
-                    vertical: 16.0,
-                  ),
-                ),
-                maxLines: 3,
                 textInputAction: TextInputAction.newline,
               ),
             ),

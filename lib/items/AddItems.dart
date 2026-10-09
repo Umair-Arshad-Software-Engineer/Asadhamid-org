@@ -9,6 +9,11 @@ import 'package:image_picker/image_picker.dart';
 import '../Models/itemModel.dart';
 import '../Provider/lanprovider.dart';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Registration type enum
+// ─────────────────────────────────────────────────────────────────────────────
+enum RegistrationType { bolt, wire }
+
 class RegisterItemPage extends StatefulWidget {
   final Map<String, dynamic>? itemData;
 
@@ -25,6 +30,9 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
   String? _imageBase64;
   html.File? _webImageFile;
 
+  // ── Registration type ──
+  RegistrationType _registrationType = RegistrationType.bolt;
+
   bool _isBOM = false;
 
   late TextEditingController _itemNameController;
@@ -34,34 +42,34 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
   late TextEditingController _currentLengthSalePriceController;
   late TextEditingController _sizeQtyController;
 
+  // ── Wire-specific controllers ──
+  late TextEditingController _wireCostPriceController;
+  late TextEditingController _wireSalePriceController;
+  late TextEditingController _wireStockController;
+  late TextEditingController _wireLowStockController;
+
   List<LengthBodyCombination> _lengthBodyCombinations = [];
   String? _selectedBodyTypeForCurrent;
   String? _currentLength;
   String? _currentLengthDecimal;
 
-  final TextEditingController _vendorsearchController = TextEditingController();
   final TextEditingController _bomItemSearchController = TextEditingController();
   final TextEditingController _currentStockController = TextEditingController();
   final TextEditingController _lowStockThresholdController =
   TextEditingController(text: '10');
 
-  String? _selectedVendor;
+  // NOTE: _vendors, _selectedVendor, _vendorsearchController removed.
 
-  List<String> _vendors = [];
   List<Map<String, dynamic>> _customers = [];
   List<Map<String, dynamic>> _items = [];
 
   final List<String> _bodyTypes = ['Half', 'Full', 'Half+Full'];
 
-  bool _isLoadingVendors = false;
   bool _isLoadingItems = false;
-  List<String> _filteredVendors = [];
   List<Map<String, dynamic>> _filteredItems = [];
 
   List<Map<String, dynamic>> _bomComponents = [];
   final TextEditingController _componentQtyController = TextEditingController();
-
-
 
   double _profitMargin1kg = 0.0;
   double _profitMargin50kg = 0.0;
@@ -72,34 +80,64 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
   double _avgSalePricePerKg = 0.0;
 
   double get totalCost {
-    return _bomComponents.fold(0.0, (sum, item) => sum + (item['price'] * item['quantity']));
+    return _bomComponents.fold(
+        0.0, (sum, item) => sum + (item['price'] * item['quantity']));
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // initState
+  // ═══════════════════════════════════════════════════════════════════════════
   @override
   void initState() {
     super.initState();
+
     _currentLengthCostPriceController = TextEditingController();
     _currentLengthSalePriceController = TextEditingController();
     _sizeQtyController = TextEditingController(text: '0');
 
-    _itemNameController = TextEditingController(text: widget.itemData?['itemName'] ?? '');
+    _itemNameController =
+        TextEditingController(text: widget.itemData?['itemName'] ?? '');
     _descriptionController =
         TextEditingController(text: widget.itemData?['description'] ?? '');
     _lengthController = TextEditingController();
 
-    _selectedVendor = widget.itemData?['vendor'];
+    // Wire controllers
+    _wireCostPriceController = TextEditingController();
+    _wireSalePriceController = TextEditingController();
+    _wireStockController = TextEditingController(text: '0');
+    _wireLowStockController = TextEditingController(text: '10');
+
+    // Detect type from existing data
+    if (widget.itemData != null) {
+      if (widget.itemData!['registrationType'] == 'wire' ||
+          widget.itemData!['isWire'] == true) {
+        _registrationType = RegistrationType.wire;
+        _wireCostPriceController.text =
+            widget.itemData!['costPrice']?.toString() ?? '';
+        _wireSalePriceController.text =
+            widget.itemData!['salePrice']?.toString() ?? '';
+        _wireStockController.text =
+            widget.itemData!['qtyOnHand']?.toString() ?? '0';
+        _wireLowStockController.text =
+            widget.itemData!['lowStockThreshold']?.toString() ?? '10';
+      }
+    }
 
     if (widget.itemData != null) {
       _sizeQtyController.text = widget.itemData!['qtyOnHand']?.toString() ?? '0';
     }
 
-    if (widget.itemData != null && widget.itemData!['lengthBodyCombinations'] != null) {
-      final List<dynamic> rawCombinations = widget.itemData!['lengthBodyCombinations'];
+    if (widget.itemData != null &&
+        widget.itemData!['lengthBodyCombinations'] != null) {
+      final List<dynamic> rawCombinations =
+      widget.itemData!['lengthBodyCombinations'];
       _lengthBodyCombinations = rawCombinations.map((item) {
         if (item is Map) {
-          return LengthBodyCombination.fromMap(Map<String, dynamic>.from(item));
+          return LengthBodyCombination.fromMap(
+              Map<String, dynamic>.from(item));
         }
-        return LengthBodyCombination(length: '', lengthDecimal: '', bodyType: '');
+        return LengthBodyCombination(
+            length: '', lengthDecimal: '', bodyType: '');
       }).toList();
       _calculateAveragePrices();
     }
@@ -110,15 +148,16 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
         final rawComponents = widget.itemData!['components'];
         if (rawComponents != null && rawComponents is List) {
           _bomComponents = rawComponents.map((component) {
-            if (component is Map) return Map<String, dynamic>.from(component);
+            if (component is Map)
+              return Map<String, dynamic>.from(component);
             return <String, dynamic>{};
           }).toList();
         }
       }
     }
 
-    _vendorsearchController.addListener(() => _filterVendors(_vendorsearchController.text));
-    _bomItemSearchController.addListener(() => _filterItems(_bomItemSearchController.text));
+    _bomItemSearchController
+        .addListener(() => _filterItems(_bomItemSearchController.text));
     _lengthController.addListener(_parseLength);
 
     fetchDropdownData();
@@ -129,6 +168,9 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Length parsing / combination helpers (bolt mode only)
+  // ═══════════════════════════════════════════════════════════════════════════
   void _parseLength() {
     setState(() {
       _currentLength = _lengthController.text;
@@ -144,7 +186,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
         _currentLengthCostPriceController.text.isEmpty ||
         _currentLengthSalePriceController.text.isEmpty ||
         _currentStockController.text.isEmpty) {
-      final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+      final languageProvider =
+      Provider.of<LanguageProvider>(context, listen: false);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(languageProvider.isEnglish
             ? 'Please enter length, body type, prices, and stock quantity'
@@ -153,13 +196,17 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
       return;
     }
 
-    final costPrice = double.tryParse(_currentLengthCostPriceController.text);
-    final salePrice = double.tryParse(_currentLengthSalePriceController.text);
+    final costPrice =
+    double.tryParse(_currentLengthCostPriceController.text);
+    final salePrice =
+    double.tryParse(_currentLengthSalePriceController.text);
     final stockQuantity = double.tryParse(_currentStockController.text);
-    final lowStockThreshold = double.tryParse(_lowStockThresholdController.text) ?? 10.0;
+    final lowStockThreshold =
+        double.tryParse(_lowStockThresholdController.text) ?? 10.0;
 
     if (costPrice == null || salePrice == null || stockQuantity == null) {
-      final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+      final languageProvider =
+      Provider.of<LanguageProvider>(context, listen: false);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(languageProvider.isEnglish
             ? 'Please enter valid prices and stock quantity'
@@ -169,10 +216,12 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     }
 
     bool combinationExists = _lengthBodyCombinations.any((combo) =>
-    combo.length == _currentLength && combo.bodyType == _selectedBodyTypeForCurrent);
+    combo.length == _currentLength &&
+        combo.bodyType == _selectedBodyTypeForCurrent);
 
     if (combinationExists) {
-      final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+      final languageProvider =
+      Provider.of<LanguageProvider>(context, listen: false);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(languageProvider.isEnglish
             ? 'This length-body combination already exists'
@@ -204,7 +253,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
       _calculateAveragePrices();
     });
 
-    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(languageProvider.isEnglish
           ? 'Length-Body combination added with pricing and stock'
@@ -261,20 +311,26 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     });
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Data fetching
+  // ═══════════════════════════════════════════════════════════════════════════
   Future<void> fetchItems() async {
     setState(() => _isLoadingItems = true);
     try {
       final DatabaseReference database = FirebaseDatabase.instance.ref();
       final snapshot = await database.child('items').get();
       if (snapshot.exists) {
-        final Map<dynamic, dynamic> itemData = snapshot.value as Map<dynamic, dynamic>;
+        final Map<dynamic, dynamic> itemData =
+        snapshot.value as Map<dynamic, dynamic>;
         setState(() {
           _items = itemData.entries.map((entry) {
             return {
               'id': entry.key,
               'name': entry.value['itemName'] as String,
               'unit': 'Pcs',
-              'price': entry.value['salePrice1kg'] ?? entry.value['salePrice'] ?? 0.0,
+              'price': entry.value['salePrice1kg'] ??
+                  entry.value['salePrice'] ??
+                  0.0,
             };
           }).toList();
           _filteredItems = List.from(_items);
@@ -287,10 +343,41 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     }
   }
 
+  Future<void> fetchDropdownData() async {
+    // Vendors fetching removed. Only customers are needed for bolt combos.
+    await _fetchCustomers();
+  }
+
+  Future<void> _fetchCustomers() async {
+    try {
+      final DatabaseReference database = FirebaseDatabase.instance.ref();
+      final snapshot = await database.child('customers').get();
+      if (snapshot.exists) {
+        final Map<dynamic, dynamic> customerData =
+        snapshot.value as Map<dynamic, dynamic>;
+        setState(() {
+          _customers = customerData.entries.map((entry) {
+            return {
+              'id': entry.key,
+              'name': entry.value['name'] as String,
+              'phone': entry.value['phone'] ?? '',
+            };
+          }).toList();
+        });
+      }
+    } catch (e) {
+      print('Error fetching customers: $e');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Image handling
+  // ═══════════════════════════════════════════════════════════════════════════
   Future<void> _pickImage() async {
     try {
       if (kIsWeb) {
-        final html.FileUploadInputElement uploadInput = html.FileUploadInputElement();
+        final html.FileUploadInputElement uploadInput =
+        html.FileUploadInputElement();
         uploadInput.accept = 'image/*';
         uploadInput.click();
         uploadInput.onChange.listen((e) {
@@ -331,16 +418,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     });
   }
 
-  void _filterVendors(String query) {
-    setState(() {
-      _filteredVendors = query.isEmpty
-          ? List.from(_vendors)
-          : _vendors
-          .where((v) => v.toLowerCase().contains(query.toLowerCase()))
-          .toList();
-    });
-  }
-
   void _filterItems(String query) {
     setState(() {
       _filteredItems = query.isEmpty
@@ -352,50 +429,9 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     });
   }
 
-  Future<void> fetchDropdownData() async {
-    final DatabaseReference database = FirebaseDatabase.instance.ref();
-    setState(() => _isLoadingVendors = true);
-    try {
-      final snapshot = await database.child('vendors').get();
-      if (snapshot.exists) {
-        final Map<dynamic, dynamic> vendorData =
-        snapshot.value as Map<dynamic, dynamic>;
-        setState(() {
-          _vendors = vendorData.entries
-              .map((entry) => entry.value['name'] as String)
-              .toList();
-          _filteredVendors = List.from(_vendors);
-        });
-      }
-    } catch (e) {
-      print('Error fetching vendors: $e');
-    } finally {
-      setState(() => _isLoadingVendors = false);
-    }
-    // Fetch customers for combination-level price dialog
-    await _fetchCustomers();
-  }
-
-  Future<void> _fetchCustomers() async {
-    try {
-      final DatabaseReference database = FirebaseDatabase.instance.ref();
-      final snapshot = await database.child('customers').get();
-      if (snapshot.exists) {
-        final Map<dynamic, dynamic> customerData =
-        snapshot.value as Map<dynamic, dynamic>;
-        setState(() {
-          _customers = customerData.entries.map((entry) => {
-            'id': entry.key,
-            'name': entry.value['name'] as String,
-            'phone': entry.value['phone'] ?? '',
-          }).toList();
-        });
-      }
-    } catch (e) {
-      print('Error fetching customers: $e');
-    }
-  }
-
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BOM helpers (bolt mode only)
+  // ═══════════════════════════════════════════════════════════════════════════
   void _addBomComponent(Map<String, dynamic> item, double quantity) {
     setState(() {
       _bomComponents.add({
@@ -414,274 +450,10 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     setState(() => _bomComponents.removeAt(index));
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // NEW: Per-combination customer prices dialog
-  // ─────────────────────────────────────────────────────────────────────────────
-  void _showCombinationCustomerPricesDialog(int index) {
-    final combination = _lengthBodyCombinations[index];
-    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
-
-    // Work on a local copy so Cancel truly cancels
-    Map<String, double> localPrices = Map.from(combination.customerPrices);
-    final TextEditingController searchController = TextEditingController();
-    List<Map<String, dynamic>> filteredCustomers = List.from(_customers);
-
-    showDialog(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            return AlertDialog(
-              title: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    languageProvider.isEnglish
-                        ? 'Customer Prices'
-                        : 'کسٹمر قیمتیں',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  Text(
-                    '${combination.length}  —  ${combination.bodyType}',
-                    style: TextStyle(fontSize: 13, color: Colors.grey[600]),
-                  ),
-                ],
-              ),
-              content: SizedBox(
-                width: double.maxFinite,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Default price banner
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.blue[50],
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(Icons.info_outline, size: 16, color: Colors.blue[700]),
-                          const SizedBox(width: 6),
-                          Text(
-                            languageProvider.isEnglish
-                                ? 'Default sale price: ${combination.salePricePerKg?.toStringAsFixed(2) ?? "N/A"} PKR/kg'
-                                : 'پہلے سے طے شدہ قیمت: ${combination.salePricePerKg?.toStringAsFixed(2) ?? "N/A"} روپے/کلو',
-                            style: TextStyle(
-                              color: Colors.blue[700],
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-
-                    // Search field
-                    TextField(
-                      controller: searchController,
-                      decoration: InputDecoration(
-                        hintText: languageProvider.isEnglish
-                            ? 'Search customers...'
-                            : 'کسٹمر تلاش کریں...',
-                        border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8)),
-                        prefixIcon: const Icon(Icons.search),
-                        isDense: true,
-                      ),
-                      onChanged: (value) {
-                        setDialogState(() {
-                          filteredCustomers = value.isEmpty
-                              ? List.from(_customers)
-                              : _customers
-                              .where((c) => c['name']
-                              .toLowerCase()
-                              .contains(value.toLowerCase()))
-                              .toList();
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 8),
-
-                    // Customer list
-                    Container(
-                      height: 280,
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey[300]!),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: _customers.isEmpty
-                          ? const Center(child: CircularProgressIndicator())
-                          : ListView.builder(
-                        itemCount: filteredCustomers.length,
-                        itemBuilder: (context, i) {
-                          final customer = filteredCustomers[i];
-                          final customerId = customer['id'] as String;
-                          final hasCustomPrice =
-                          localPrices.containsKey(customerId);
-                          final currentPrice = localPrices[customerId];
-
-                          return ListTile(
-                            dense: true,
-                            title: Text(customer['name']),
-                            subtitle: hasCustomPrice
-                                ? Text(
-                              '${currentPrice!.toStringAsFixed(2)} PKR/kg',
-                              style: TextStyle(
-                                color: Colors.green[700],
-                                fontWeight: FontWeight.bold,
-                              ),
-                            )
-                                : Text(
-                              languageProvider.isEnglish
-                                  ? 'Using default price'
-                                  : 'پہلے سے طے شدہ قیمت',
-                              style: TextStyle(
-                                  color: Colors.grey[500],
-                                  fontSize: 11),
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                // Delete custom price
-                                if (hasCustomPrice)
-                                  IconButton(
-                                    icon: const Icon(
-                                        Icons.delete_outline,
-                                        color: Colors.red,
-                                        size: 18),
-                                    onPressed: () => setDialogState(
-                                            () => localPrices
-                                            .remove(customerId)),
-                                  ),
-                                // Add / Edit custom price
-                                IconButton(
-                                  icon: Icon(
-                                    hasCustomPrice
-                                        ? Icons.edit
-                                        : Icons.add_circle_outline,
-                                    color: hasCustomPrice
-                                        ? Colors.orange
-                                        : Colors.green,
-                                    size: 18,
-                                  ),
-                                  onPressed: () async {
-                                    final priceController =
-                                    TextEditingController(
-                                      text: currentPrice
-                                          ?.toStringAsFixed(2) ??
-                                          '',
-                                    );
-                                    final price =
-                                    await showDialog<double>(
-                                      context: context,
-                                      builder: (_) => AlertDialog(
-                                        title: Text(customer['name']),
-                                        content: TextField(
-                                          controller: priceController,
-                                          keyboardType:
-                                          TextInputType.number,
-                                          autofocus: true,
-                                          decoration: InputDecoration(
-                                            labelText: languageProvider
-                                                .isEnglish
-                                                ? 'Sale Price (PKR/kg)'
-                                                : 'فروخت قیمت (روپے/کلو)',
-                                            border:
-                                            const OutlineInputBorder(),
-                                            prefixText: 'PKR ',
-                                            helperText:
-                                            'Default: ${combination.salePricePerKg?.toStringAsFixed(2)} PKR/kg',
-                                          ),
-                                        ),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.pop(context),
-                                            child: Text(languageProvider
-                                                .isEnglish
-                                                ? 'Cancel'
-                                                : 'منسوخ'),
-                                          ),
-                                          ElevatedButton(
-                                            style:
-                                            ElevatedButton.styleFrom(
-                                              backgroundColor:
-                                              Colors.orange[300],
-                                            ),
-                                            onPressed: () {
-                                              final p = double.tryParse(
-                                                  priceController.text);
-                                              if (p != null && p > 0) {
-                                                Navigator.pop(context, p);
-                                              }
-                                            },
-                                            child: Text(
-                                              languageProvider.isEnglish
-                                                  ? 'Save'
-                                                  : 'محفوظ کریں',
-                                              style: const TextStyle(
-                                                  color: Colors.white),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                    if (price != null) {
-                                      setDialogState(() =>
-                                      localPrices[customerId] =
-                                          price);
-                                    }
-                                  },
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(dialogContext),
-                  child: Text(
-                      languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.orange[300]),
-                  onPressed: () {
-                    setState(() {
-                      _lengthBodyCombinations[index] =
-                          combination.copyWith(customerPrices: localPrices);
-                    });
-                    Navigator.pop(dialogContext);
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(languageProvider.isEnglish
-                          ? 'Customer prices saved for this combination'
-                          : 'اس مجموعے کے لیے کسٹمر قیمتیں محفوظ ہو گئیں'),
-                    ));
-                  },
-                  child: Text(
-                    languageProvider.isEnglish ? 'Save' : 'محفوظ کریں',
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
-
   void _showAddBomComponentDialog(Map<String, dynamic> item) {
     TextEditingController qtyController = TextEditingController();
-    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
 
     showDialog(
       context: context,
@@ -720,7 +492,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                   ));
                 }
               },
-              child: Text(languageProvider.isEnglish ? 'Add' : 'شامل کریں'),
+              child:
+              Text(languageProvider.isEnglish ? 'Add' : 'شامل کریں'),
             ),
           ],
         );
@@ -728,6 +501,279 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Customer prices dialog (bolt combo only)
+  // ═══════════════════════════════════════════════════════════════════════════
+  void _showCombinationCustomerPricesDialog(int index) {
+    final combination = _lengthBodyCombinations[index];
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
+
+    Map<String, double> localPrices = Map.from(combination.customerPrices);
+    final TextEditingController searchController = TextEditingController();
+    List<Map<String, dynamic>> filteredCustomers = List.from(_customers);
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    languageProvider.isEnglish
+                        ? 'Customer Prices'
+                        : 'کسٹمر قیمتیں',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  Text(
+                    '${combination.length}  —  ${combination.bodyType}',
+                    style:
+                    TextStyle(fontSize: 13, color: Colors.grey[600]),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.blue[50],
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.info_outline,
+                              size: 16, color: Colors.blue[700]),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              languageProvider.isEnglish
+                                  ? 'Default sale price: ${combination.salePricePerKg?.toStringAsFixed(2) ?? "N/A"} PKR/kg'
+                                  : 'پہلے سے طے شدہ قیمت: ${combination.salePricePerKg?.toStringAsFixed(2) ?? "N/A"} روپے/کلو',
+                              style: TextStyle(
+                                color: Colors.blue[700],
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: searchController,
+                      decoration: InputDecoration(
+                        hintText: languageProvider.isEnglish
+                            ? 'Search customers...'
+                            : 'کسٹمر تلاش کریں...',
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                        prefixIcon: const Icon(Icons.search),
+                        isDense: true,
+                      ),
+                      onChanged: (value) {
+                        setDialogState(() {
+                          filteredCustomers = value.isEmpty
+                              ? List.from(_customers)
+                              : _customers
+                              .where((c) => c['name']
+                              .toLowerCase()
+                              .contains(value.toLowerCase()))
+                              .toList();
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      height: 280,
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey[300]!),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: _customers.isEmpty
+                          ? const Center(
+                          child: CircularProgressIndicator())
+                          : ListView.builder(
+                        itemCount: filteredCustomers.length,
+                        itemBuilder: (context, i) {
+                          final customer = filteredCustomers[i];
+                          final customerId = customer['id'] as String;
+                          final hasCustomPrice =
+                          localPrices.containsKey(customerId);
+                          final currentPrice =
+                          localPrices[customerId];
+
+                          return ListTile(
+                            dense: true,
+                            title: Text(customer['name']),
+                            subtitle: hasCustomPrice
+                                ? Text(
+                              '${currentPrice!.toStringAsFixed(2)} PKR/kg',
+                              style: TextStyle(
+                                color: Colors.green[700],
+                                fontWeight: FontWeight.bold,
+                              ),
+                            )
+                                : Text(
+                              languageProvider.isEnglish
+                                  ? 'Using default price'
+                                  : 'پہلے سے طے شدہ قیمت',
+                              style: TextStyle(
+                                  color: Colors.grey[500],
+                                  fontSize: 11),
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (hasCustomPrice)
+                                  IconButton(
+                                    icon: const Icon(
+                                        Icons.delete_outline,
+                                        color: Colors.red,
+                                        size: 18),
+                                    onPressed: () => setDialogState(
+                                            () => localPrices
+                                            .remove(customerId)),
+                                  ),
+                                IconButton(
+                                  icon: Icon(
+                                    hasCustomPrice
+                                        ? Icons.edit
+                                        : Icons.add_circle_outline,
+                                    color: hasCustomPrice
+                                        ? Colors.orange
+                                        : Colors.green,
+                                    size: 18,
+                                  ),
+                                  onPressed: () async {
+                                    final priceController =
+                                    TextEditingController(
+                                      text: currentPrice
+                                          ?.toStringAsFixed(2) ??
+                                          '',
+                                    );
+                                    final price =
+                                    await showDialog<double>(
+                                      context: context,
+                                      builder: (_) => AlertDialog(
+                                        title:
+                                        Text(customer['name']),
+                                        content: TextField(
+                                          controller: priceController,
+                                          keyboardType:
+                                          TextInputType.number,
+                                          autofocus: true,
+                                          decoration: InputDecoration(
+                                            labelText: languageProvider
+                                                .isEnglish
+                                                ? 'Sale Price (PKR/kg)'
+                                                : 'فروخت قیمت (روپے/کلو)',
+                                            border:
+                                            const OutlineInputBorder(),
+                                            prefixText: 'PKR ',
+                                            helperText:
+                                            'Default: ${combination.salePricePerKg?.toStringAsFixed(2)} PKR/kg',
+                                          ),
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(
+                                                    context),
+                                            child: Text(
+                                                languageProvider
+                                                    .isEnglish
+                                                    ? 'Cancel'
+                                                    : 'منسوخ'),
+                                          ),
+                                          ElevatedButton(
+                                            style: ElevatedButton
+                                                .styleFrom(
+                                              backgroundColor:
+                                              Colors.orange[300],
+                                            ),
+                                            onPressed: () {
+                                              final p = double.tryParse(
+                                                  priceController
+                                                      .text);
+                                              if (p != null && p > 0) {
+                                                Navigator.pop(
+                                                    context, p);
+                                              }
+                                            },
+                                            child: Text(
+                                              languageProvider
+                                                  .isEnglish
+                                                  ? 'Save'
+                                                  : 'محفوظ کریں',
+                                              style: const TextStyle(
+                                                  color: Colors.white),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                    if (price != null) {
+                                      setDialogState(() =>
+                                      localPrices[customerId] =
+                                          price);
+                                    }
+                                  },
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: Text(
+                      languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange[300]),
+                  onPressed: () {
+                    setState(() {
+                      _lengthBodyCombinations[index] = combination.copyWith(
+                          customerPrices: localPrices);
+                    });
+                    Navigator.pop(dialogContext);
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(languageProvider.isEnglish
+                          ? 'Customer prices saved for this combination'
+                          : 'اس مجموعے کے لیے کسٹمر قیمتیں محفوظ ہو گئیں'),
+                    ));
+                  },
+                  child: Text(
+                    languageProvider.isEnglish ? 'Save' : 'محفوظ کریں',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Save / clear
+  // ═══════════════════════════════════════════════════════════════════════════
   Future<bool> checkIfItemExists(String itemName) async {
     final DatabaseReference database = FirebaseDatabase.instance.ref();
     final snapshot = await database.child('items').get();
@@ -750,7 +796,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
       _lengthController.clear();
       _currentLengthCostPriceController.clear();
       _currentLengthSalePriceController.clear();
-      _selectedVendor = null;
       _selectedBodyTypeForCurrent = null;
       _bomComponents.clear();
       _lengthBodyCombinations.clear();
@@ -762,26 +807,71 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
       _currentLengthDecimal = null;
       _avgCostPricePerKg = 0.0;
       _avgSalePricePerKg = 0.0;
+      _wireCostPriceController.clear();
+      _wireSalePriceController.clear();
+      _wireStockController.text = '0';
+      _wireLowStockController.text = '10';
+      _imageBase64 = null;
+      _imageFile = null;
     });
   }
 
   void saveOrUpdateItem() async {
-    if (_formKey.currentState!.validate()) {
-      final itemName = _itemNameController.text;
+    if (!_formKey.currentState!.validate()) return;
 
-      if (widget.itemData == null) {
-        bool itemExists = await checkIfItemExists(itemName);
-        if (itemExists) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Item with this name already exists!')),
-          );
-          return;
-        }
+    final itemName = _itemNameController.text;
+
+    if (widget.itemData == null) {
+      bool itemExists = await checkIfItemExists(itemName);
+      if (itemExists) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Item with this name already exists!')),
+        );
+        return;
+      }
+    }
+
+    final DatabaseReference database = FirebaseDatabase.instance.ref();
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
+
+    Map<String, dynamic> newItem;
+
+    // ── WIRE MODE ──
+    if (_registrationType == RegistrationType.wire) {
+      final costPrice = double.tryParse(_wireCostPriceController.text);
+      final salePrice = double.tryParse(_wireSalePriceController.text);
+      final stock = double.tryParse(_wireStockController.text) ?? 0.0;
+      final lowStock =
+          double.tryParse(_wireLowStockController.text) ?? 10.0;
+
+      if (costPrice == null || salePrice == null) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(languageProvider.isEnglish
+              ? 'Please enter valid cost and sale prices'
+              : 'براہ کرم درست لاگت اور فروخت قیمتیں درج کریں'),
+        ));
+        return;
       }
 
+      newItem = {
+        'itemName': itemName,
+        'description': _descriptionController.text,
+        'registrationType': 'wire',
+        'isWire': true,
+        'costPrice': costPrice,
+        'salePrice': salePrice,
+        'unit': 'Kg',
+        'qtyOnHand': stock,
+        'lowStockThreshold': lowStock,
+        'image': _imageBase64,
+        'createdAt': ServerValue.timestamp,
+      };
+    }
+    // ── BOLT MODE ──
+    else {
       if (_lengthBodyCombinations.isEmpty) {
-        final languageProvider =
-        Provider.of<LanguageProvider>(context, listen: false);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(languageProvider.isEnglish
               ? 'Please add at least one length-body combination with pricing'
@@ -789,8 +879,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
         ));
         return;
       }
-
-      final DatabaseReference database = FirebaseDatabase.instance.ref();
 
       double totalBOMCost = 0.0;
       if (_isBOM) {
@@ -802,9 +890,10 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
       Map<String, double> customerPrices = {};
       final qtyOnHand = double.tryParse(_sizeQtyController.text) ?? 0.0;
 
-      final newItem = {
+      newItem = {
         'itemName': itemName,
         'description': _descriptionController.text,
+        'registrationType': 'bolt',
         'lengthBodyCombinations':
         _lengthBodyCombinations.map((c) => c.toMap()).toList(),
         'avgCostPricePerKg': _avgCostPricePerKg,
@@ -817,7 +906,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
         'costPrice': _isBOM ? totalBOMCost : _avgCostPricePerKg,
         'salePrice': _avgSalePricePerKg,
         'qtyOnHand': qtyOnHand,
-        'vendor': _selectedVendor,
         'customerBasePrices': customerPrices,
         'image': _imageBase64,
         'isBOM': _isBOM,
@@ -829,33 +917,39 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
         'profitPercentage50kg': _profitPercentage50kg,
         'hasMultipleLengthPrices': _lengthBodyCombinations.isNotEmpty,
       };
+    }
 
-      if (widget.itemData == null) {
-        database.child('items').push().set(newItem).then((_) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Item registered successfully!')),
-          );
-          _clearFormFields();
-        }).catchError((error) {
-          print(error);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to register item: $error')),
-          );
-        });
-      } else {
-        database.child('items/${widget.itemData!['key']}').set(newItem).then((_) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Item updated successfully!')),
-          );
-        }).catchError((error) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to update item: $error')),
-          );
-        });
-      }
+    if (widget.itemData == null) {
+      database.child('items').push().set(newItem).then((_) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Item registered successfully!')),
+        );
+        _clearFormFields();
+      }).catchError((error) {
+        print(error);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to register item: $error')),
+        );
+      });
+    } else {
+      database
+          .child('items/${widget.itemData!['key']}')
+          .set(newItem)
+          .then((_) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Item updated successfully!')),
+        );
+      }).catchError((error) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update item: $error')),
+        );
+      });
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Widgets
+  // ═══════════════════════════════════════════════════════════════════════════
   Widget _buildImagePreview() {
     if (_imageBase64 != null) {
       return Stack(
@@ -867,7 +961,9 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
               borderRadius: BorderRadius.circular(8),
               image: DecorationImage(
                 image: kIsWeb
-                    ? Image.network('data:image/png;base64,$_imageBase64').image
+                    ? Image.network(
+                    'data:image/png;base64,$_imageBase64')
+                    .image
                     : MemoryImage(base64Decode(_imageBase64!)),
                 fit: BoxFit.cover,
               ),
@@ -899,7 +995,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
   Widget _buildBomComponentsList() {
     if (_bomComponents.isEmpty) {
       return const Center(
-        child: Text('No components added yet', style: TextStyle(color: Colors.grey)),
+        child: Text('No components added yet',
+            style: TextStyle(color: Colors.grey)),
       );
     }
     return ListView.builder(
@@ -992,19 +1089,20 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                     ),
                     const SizedBox(width: 8),
                     Text('($stockStatus)',
-                        style: TextStyle(fontSize: 12, color: stockColor)),
+                        style:
+                        TextStyle(fontSize: 12, color: stockColor)),
                   ],
                 ),
-                // ─── NEW: Customer price count badge ───
                 if (combination.customerPrices.isNotEmpty)
                   Row(
                     children: [
-                      const Icon(Icons.people, size: 14, color: Colors.purple),
+                      const Icon(Icons.people,
+                          size: 14, color: Colors.purple),
                       const SizedBox(width: 4),
                       Text(
                         '${combination.customerPrices.length} custom price(s)',
-                        style:
-                        const TextStyle(fontSize: 12, color: Colors.purple),
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.purple),
                       ),
                     ],
                   ),
@@ -1014,7 +1112,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (combination.lengthDecimal.isNotEmpty)
-                  Text('Length (Decimal): ${combination.lengthDecimal}'),
+                  Text(
+                      'Length (Decimal): ${combination.lengthDecimal}'),
                 if (combination.costPricePerKg != null &&
                     combination.salePricePerKg != null)
                   Column(
@@ -1043,24 +1142,20 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // ─── NEW: Customer prices button ───
                 IconButton(
                   icon: const Icon(Icons.people, color: Colors.purple),
                   tooltip: 'Customer Prices',
                   onPressed: () =>
                       _showCombinationCustomerPricesDialog(index),
                 ),
-                // Edit stock
                 IconButton(
                   icon: const Icon(Icons.inventory, color: Colors.blue),
                   onPressed: () => _editStockForCombination(index),
                 ),
-                // Edit combination
                 IconButton(
                   icon: const Icon(Icons.edit, color: Colors.blue),
                   onPressed: () => _editLengthBodyCombination(index),
                 ),
-                // Delete
                 IconButton(
                   icon: const Icon(Icons.delete, color: Colors.red),
                   onPressed: () => _removeLengthBodyCombination(index),
@@ -1075,11 +1170,12 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
 
   void _editStockForCombination(int index) {
     final combination = _lengthBodyCombinations[index];
-    TextEditingController stockController =
-    TextEditingController(text: combination.stockQuantity.toStringAsFixed(2));
-    TextEditingController thresholdController =
-    TextEditingController(text: combination.lowStockThreshold.toStringAsFixed(2));
-    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    TextEditingController stockController = TextEditingController(
+        text: combination.stockQuantity.toStringAsFixed(2));
+    TextEditingController thresholdController = TextEditingController(
+        text: combination.lowStockThreshold.toStringAsFixed(2));
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
 
     showDialog(
       context: context,
@@ -1095,8 +1191,9 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                 controller: stockController,
                 keyboardType: TextInputType.number,
                 decoration: InputDecoration(
-                  labelText:
-                  languageProvider.isEnglish ? 'Current Stock' : 'موجودہ اسٹاک',
+                  labelText: languageProvider.isEnglish
+                      ? 'Current Stock'
+                      : 'موجودہ اسٹاک',
                   suffixText: combination.stockUnit,
                   border: const OutlineInputBorder(),
                 ),
@@ -1118,18 +1215,21 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
+              child:
+              Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
             ),
             TextButton(
               onPressed: () {
                 final newStock = double.tryParse(stockController.text);
-                final newThreshold = double.tryParse(thresholdController.text);
+                final newThreshold =
+                double.tryParse(thresholdController.text);
                 if (newStock != null && newThreshold != null) {
                   setState(() {
-                    _lengthBodyCombinations[index] = combination.copyWith(
-                      stockQuantity: newStock,
-                      lowStockThreshold: newThreshold,
-                    );
+                    _lengthBodyCombinations[index] =
+                        combination.copyWith(
+                          stockQuantity: newStock,
+                          lowStockThreshold: newThreshold,
+                        );
                   });
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1139,7 +1239,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                   ));
                 }
               },
-              child: Text(languageProvider.isEnglish ? 'Update' : 'اپ ڈیٹ کریں'),
+              child: Text(
+                  languageProvider.isEnglish ? 'Update' : 'اپ ڈیٹ کریں'),
             ),
           ],
         );
@@ -1150,7 +1251,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
   Widget _buildProfitMarginDisplay() {
     return Card(
       elevation: 3,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape:
+      RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -1172,9 +1274,11 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                   children: [
                     const Text('Average 1 Kg Price:',
                         style: TextStyle(fontWeight: FontWeight.bold)),
-                    Text('Cost: ${_avgCostPricePerKg.toStringAsFixed(2)} PKR',
+                    Text(
+                        'Cost: ${_avgCostPricePerKg.toStringAsFixed(2)} PKR',
                         style: const TextStyle(color: Colors.blue)),
-                    Text('Sale: ${_avgSalePricePerKg.toStringAsFixed(2)} PKR',
+                    Text(
+                        'Sale: ${_avgSalePricePerKg.toStringAsFixed(2)} PKR',
                         style: const TextStyle(color: Colors.green)),
                     const SizedBox(height: 8),
                     const Text('Profit (1Kg):',
@@ -1247,7 +1351,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
 
   Widget _buildDecimalValueDisplay(String label, String? decimalValue,
       {double fontSize = 14.0}) {
-    if (decimalValue == null || decimalValue.isEmpty) return const SizedBox.shrink();
+    if (decimalValue == null || decimalValue.isEmpty)
+      return const SizedBox.shrink();
     return Container(
       padding: const EdgeInsets.all(8),
       margin: const EdgeInsets.only(top: 4),
@@ -1287,7 +1392,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                   color: Colors.blue[700]),
             ),
             const SizedBox(height: 16),
-
             FractionInputField(
               controller: _lengthController,
               labelText: languageProvider.isEnglish ? 'Length' : 'لمبائی',
@@ -1300,12 +1404,13 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
               onChanged: (value) => _parseLength(),
             ),
             _buildDecimalValueDisplay(
-              languageProvider.isEnglish ? 'Length (decimal)' : 'لمبائی (اعشاریہ)',
+              languageProvider.isEnglish
+                  ? 'Length (decimal)'
+                  : 'لمبائی (اعشاریہ)',
               _currentLengthDecimal,
               fontSize: 14.0,
             ),
             const SizedBox(height: 16),
-
             DropdownButtonFormField<String>(
               value: _selectedBodyTypeForCurrent,
               decoration: InputDecoration(
@@ -1324,7 +1429,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
               },
             ),
             const SizedBox(height: 16),
-
             Row(
               children: [
                 Expanded(
@@ -1357,7 +1461,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
               ],
             ),
             const SizedBox(height: 16),
-
             Row(
               children: [
                 Expanded(
@@ -1392,7 +1495,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
               ],
             ),
             const SizedBox(height: 20),
-
             ElevatedButton.icon(
               onPressed: _addLengthBodyCombination,
               style: ElevatedButton.styleFrom(
@@ -1410,7 +1512,6 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
               ),
             ),
             const SizedBox(height: 20),
-
             if (_lengthBodyCombinations.isNotEmpty)
               Container(
                 padding: const EdgeInsets.all(12),
@@ -1452,12 +1553,12 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                 ),
               ),
             const SizedBox(height: 20),
-
             Text(
               languageProvider.isEnglish
                   ? 'Added Length Combinations (${_lengthBodyCombinations.length})'
                   : 'شامل کردہ لمبائی کے مجموعے (${_lengthBodyCombinations.length})',
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              style:
+              const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 10),
             _buildLengthBodyCombinationsList(),
@@ -1489,7 +1590,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     _lengthBodyCombinations.removeAt(index);
     _calculateAveragePrices();
 
-    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(languageProvider.isEnglish
           ? 'Length combination loaded for editing'
@@ -1497,6 +1599,104 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     ));
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // WIRE section builder
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _buildWireSection() {
+    final languageProvider = Provider.of<LanguageProvider>(context);
+
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              languageProvider.isEnglish
+                  ? 'Wire Pricing & Stock'
+                  : 'وائر کی قیمت اور اسٹاک',
+              style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue[700]),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _wireCostPriceController,
+                    decoration: InputDecoration(
+                      labelText: languageProvider.isEnglish
+                          ? 'Cost Price'
+                          : 'لاگت قیمت',
+                      border: const OutlineInputBorder(),
+                      prefixText: 'PKR ',
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _wireSalePriceController,
+                    decoration: InputDecoration(
+                      labelText: languageProvider.isEnglish
+                          ? 'Sale Price'
+                          : 'فروخت قیمت',
+                      border: const OutlineInputBorder(),
+                      prefixText: 'PKR ',
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _wireStockController,
+                    decoration: InputDecoration(
+                      labelText: languageProvider.isEnglish
+                          ? 'Initial Stock'
+                          : 'ابتدائی اسٹاک',
+                      border: const OutlineInputBorder(),
+                      suffixText: 'kg',
+                      prefixIcon: const Icon(Icons.inventory),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _wireLowStockController,
+                    decoration: InputDecoration(
+                      labelText: languageProvider.isEnglish
+                          ? 'Low Stock Alert'
+                          : 'کم اسٹاک الرٹ',
+                      border: const OutlineInputBorder(),
+                      suffixText: 'kg',
+                      prefixIcon: const Icon(Icons.warning),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // build
+  // ═══════════════════════════════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     final languageProvider = Provider.of<LanguageProvider>(context);
@@ -1511,12 +1711,18 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
             (sum, item) =>
         sum + (item['price'] * item['quantity']).abs());
 
+    final isWire = _registrationType == RegistrationType.wire;
+
     return Scaffold(
       appBar: AppBar(
         title: Text(
           languageProvider.isEnglish
-              ? (_isBOM ? 'Create BOM' : 'Register Item')
-              : (_isBOM ? 'BOM بنائیں' : 'آئٹم ایڈ کریں'),
+              ? (isWire
+              ? 'Register Wire'
+              : (_isBOM ? 'Create BOM' : 'Register Bolt'))
+              : (isWire
+              ? 'وائر رجسٹر کریں'
+              : (_isBOM ? 'BOM بنائیں' : 'بولٹ ایڈ کریں')),
           style: const TextStyle(color: Colors.white),
         ),
         flexibleSpace: Container(
@@ -1530,7 +1736,68 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
         ),
         centerTitle: true,
         actions: [
+          // ── Type toggle (only when creating, not editing) ──
           if (widget.itemData == null)
+            PopupMenuButton<RegistrationType>(
+              icon: Icon(
+                isWire ? Icons.cable : Icons.hardware,
+                color: Colors.white,
+              ),
+              tooltip: languageProvider.isEnglish
+                  ? 'Switch type'
+                  : 'قسم تبدیل کریں',
+              onSelected: (type) {
+                setState(() {
+                  _registrationType = type;
+                  if (type == RegistrationType.wire) {
+                    _isBOM = false;
+                    _bomComponents.clear();
+                  }
+                });
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: RegistrationType.bolt,
+                  child: Row(
+                    children: [
+                      Icon(Icons.hardware,
+                          color: !isWire ? Colors.orange : Colors.grey),
+                      const SizedBox(width: 8),
+                      Text(languageProvider.isEnglish
+                          ? 'Bolt'
+                          : 'بولٹ'),
+                      if (!isWire)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 8),
+                          child: Icon(Icons.check,
+                              size: 16, color: Colors.green),
+                        ),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: RegistrationType.wire,
+                  child: Row(
+                    children: [
+                      Icon(Icons.cable,
+                          color: isWire ? Colors.orange : Colors.grey),
+                      const SizedBox(width: 8),
+                      Text(languageProvider.isEnglish
+                          ? 'Wire'
+                          : 'وائر'),
+                      if (isWire)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 8),
+                          child: Icon(Icons.check,
+                              size: 16, color: Colors.green),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          // ── BOM toggle (bolt mode only) ──
+          if (!isWire && widget.itemData == null)
             IconButton(
               icon: Icon(_isBOM ? Icons.inventory : Icons.assignment),
               tooltip: _isBOM
@@ -1554,48 +1821,69 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
         child: Form(
           key: _formKey,
           child: Card(
-            shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16)),
             elevation: 8,
             child: Padding(
               padding: const EdgeInsets.all(16.0),
               child: ListView(
                 children: [
-                  // Mode indicator
+                  // ── Mode indicator ──
                   Container(
                     padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
-                      color: _isBOM ? Colors.blue[50] : Colors.orange[50],
+                      color: isWire
+                          ? Colors.teal[50]
+                          : (_isBOM
+                          ? Colors.blue[50]
+                          : Colors.orange[50]),
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(
-                          color: _isBOM ? Colors.blue : Colors.orange),
+                          color: isWire
+                              ? Colors.teal
+                              : (_isBOM ? Colors.blue : Colors.orange)),
                     ),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Icon(
-                          _isBOM ? Icons.inventory : Icons.shopping_bag,
-                          color: _isBOM ? Colors.blue : Colors.orange,
+                          isWire
+                              ? Icons.cable
+                              : (_isBOM
+                              ? Icons.inventory
+                              : Icons.shopping_bag),
+                          color: isWire
+                              ? Colors.teal
+                              : (_isBOM ? Colors.blue : Colors.orange),
                         ),
                         const SizedBox(width: 8),
                         Text(
-                          _isBOM
+                          isWire
+                              ? (languageProvider.isEnglish
+                              ? 'Registering a Wire Item'
+                              : 'وائر آئٹم رجسٹر کرنا')
+                              : (_isBOM
                               ? (languageProvider.isEnglish
                               ? 'Creating a Bill of Materials'
                               : 'بل آف میٹیریلز بنانا')
                               : (languageProvider.isEnglish
-                              ? 'Registering a Single Item'
-                              : 'ایک آئٹم رجسٹر کرنا'),
+                              ? 'Registering a Bolt Item'
+                              : 'بولٹ آئٹم رجسٹر کرنا')),
                           style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: _isBOM ? Colors.blue : Colors.orange),
+                            fontWeight: FontWeight.bold,
+                            color: isWire
+                                ? Colors.teal
+                                : (_isBOM
+                                ? Colors.blue
+                                : Colors.orange),
+                          ),
                         ),
                       ],
                     ),
                   ),
                   const SizedBox(height: 20),
 
-                  // Image Upload
+                  // ── Image ──
                   Column(
                     children: [
                       Text(
@@ -1626,13 +1914,18 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                   ),
                   const SizedBox(height: 20),
 
-                  // Item Name / Size
+                  // ── Size / Name ──
                   FractionInputField(
                     controller: _itemNameController,
-                    labelText: languageProvider.isEnglish ? 'Size' : 'سائز',
+                    labelText:
+                    languageProvider.isEnglish ? 'Size' : 'سائز',
                     hintText: languageProvider.isEnglish
-                        ? 'e.g., Steel Bar 2½'
-                        : 'مثال: اسٹیل بار 2½',
+                        ? (isWire
+                        ? 'e.g., Wire 2.5mm'
+                        : 'e.g., Steel Bar 2½')
+                        : (isWire
+                        ? 'مثال: وائر 2.5mm'
+                        : 'مثال: اسٹیل بار 2½'),
                     isEnglish: languageProvider.isEnglish,
                     fontSize: 16.0,
                     labelFontSize: 16.0,
@@ -1640,7 +1933,7 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                   ),
                   const SizedBox(height: 16),
 
-                  // Description
+                  // ── Description ──
                   TextFormField(
                     controller: _descriptionController,
                     maxLines: 3,
@@ -1655,16 +1948,20 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                   ),
                   const SizedBox(height: 16),
 
-                  // Combinations section
-                  _buildLengthBodyCombinationsSection(),
-                  const SizedBox(height: 16),
+                  // ── WIRE mode: flat pricing section ──
+                  if (isWire) _buildWireSection(),
 
-                  if (_lengthBodyCombinations.isNotEmpty)
-                    _buildProfitMarginDisplay(),
-                  const SizedBox(height: 16),
+                  // ── BOLT mode: length-body combos + profit ──
+                  if (!isWire) ...[
+                    _buildLengthBodyCombinationsSection(),
+                    const SizedBox(height: 16),
+                    if (_lengthBodyCombinations.isNotEmpty)
+                      _buildProfitMarginDisplay(),
+                    const SizedBox(height: 16),
+                  ],
 
-                  // BOM section
-                  if (_isBOM) ...[
+                  // ── BOM section (bolt + BOM mode only) ──
+                  if (!isWire && _isBOM) ...[
                     Card(
                       elevation: 4,
                       shape: RoundedRectangleBorder(
@@ -1679,11 +1976,13 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                                   ? 'BOM Components'
                                   : 'BOM اجزاء',
                               style: const TextStyle(
-                                  fontSize: 18, fontWeight: FontWeight.bold),
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold),
                             ),
                             const SizedBox(height: 10),
                             if (_isLoadingItems)
-                              const Center(child: CircularProgressIndicator())
+                              const Center(
+                                  child: CircularProgressIndicator())
                             else if (_items.isNotEmpty)
                               Column(
                                 children: [
@@ -1696,11 +1995,13 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                                       border: OutlineInputBorder(
                                           borderRadius:
                                           BorderRadius.circular(8)),
-                                      prefixIcon: const Icon(Icons.search),
+                                      prefixIcon:
+                                      const Icon(Icons.search),
                                     ),
                                   ),
                                   const SizedBox(height: 10),
-                                  if (_bomItemSearchController.text.isNotEmpty)
+                                  if (_bomItemSearchController
+                                      .text.isNotEmpty)
                                     Container(
                                       height: 150,
                                       decoration: BoxDecoration(
@@ -1712,7 +2013,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                                       child: ListView.builder(
                                         itemCount: _filteredItems.length,
                                         itemBuilder: (context, index) {
-                                          final item = _filteredItems[index];
+                                          final item =
+                                          _filteredItems[index];
                                           return ListTile(
                                             title: Text(item['name']),
                                             subtitle: Text(
@@ -1734,7 +2036,8 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                                   ? 'Added Components (${_bomComponents.length})'
                                   : 'شامل کردہ اجزاء (${_bomComponents.length})',
                               style: const TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.bold),
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold),
                             ),
                             const SizedBox(height: 10),
                             _buildBomComponentsList(),
@@ -1769,96 +2072,11 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                     const SizedBox(height: 20),
                   ],
 
-                  // Vendor
-                  if (!_isBOM) ...[
-                    if (_isLoadingVendors)
-                      const Center(child: CircularProgressIndicator())
-                    else if (_vendors.isNotEmpty)
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            languageProvider.isEnglish
-                                ? 'Search Vendor'
-                                : 'وینڈر تلاش کریں',
-                            style: const TextStyle(
-                                fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 10),
-                          TextField(
-                            controller: _vendorsearchController,
-                            decoration: InputDecoration(
-                              hintText: languageProvider.isEnglish
-                                  ? 'Type to search vendors...'
-                                  : 'وینڈرز کو تلاش کرنے کے لیے ٹائپ کریں...',
-                              border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(8)),
-                              prefixIcon: const Icon(Icons.search),
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          if (_vendorsearchController.text.isNotEmpty)
-                            Container(
-                              height: 200,
-                              decoration: BoxDecoration(
-                                border: Border.all(color: Colors.grey),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: ListView.builder(
-                                itemCount: _filteredVendors.length,
-                                itemBuilder: (context, index) {
-                                  final vendor = _filteredVendors[index];
-                                  return ListTile(
-                                    title: Text(vendor),
-                                    onTap: () {
-                                      setState(() {
-                                        _selectedVendor = vendor;
-                                        _vendorsearchController.clear();
-                                        _filteredVendors =
-                                            List.from(_vendors);
-                                      });
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(SnackBar(
-                                        content: Text(
-                                            '${languageProvider.isEnglish ? 'Selected Vendor: ' : 'منتخب فروش: '}$vendor'),
-                                      ));
-                                    },
-                                  );
-                                },
-                              ),
-                            ),
-                          const SizedBox(height: 20),
-                          if (_selectedVendor != null)
-                            Container(
-                              padding: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.shade50,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: Colors.orange),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(Icons.check_circle,
-                                      color: Colors.orange[300]),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Text(
-                                      '${languageProvider.isEnglish ? 'Selected Vendor: ' : 'منتخب فروش: '}$_selectedVendor',
-                                      style: TextStyle(
-                                          fontSize: 16,
-                                          color: Colors.orange[300]),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                        ],
-                      ),
-                    const SizedBox(height: 20),
-                  ],
+                  // NOTE: Vendor selection section removed entirely.
 
                   const SizedBox(height: 20),
 
+                  // ── Save button ──
                   ElevatedButton(
                     onPressed: saveOrUpdateItem,
                     style: ElevatedButton.styleFrom(
@@ -1869,10 +2087,18 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
                     child: Text(
                       languageProvider.isEnglish
                           ? (widget.itemData == null
-                          ? (_isBOM ? 'Create BOM' : 'Register Item')
+                          ? (isWire
+                          ? 'Register Wire'
+                          : (_isBOM
+                          ? 'Create BOM'
+                          : 'Register Bolt'))
                           : 'Update')
                           : (widget.itemData == null
-                          ? (_isBOM ? 'BOM بنائیں' : 'آئٹم ایڈ کریں')
+                          ? (isWire
+                          ? 'وائر رجسٹر کریں'
+                          : (_isBOM
+                          ? 'BOM بنائیں'
+                          : 'بولٹ ایڈ کریں'))
                           : 'اپ ڈیٹ کریں'),
                       style: const TextStyle(color: Colors.white),
                     ),
@@ -1886,6 +2112,9 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // dispose
+  // ═══════════════════════════════════════════════════════════════════════════
   @override
   void dispose() {
     _currentLengthCostPriceController.dispose();
@@ -1893,10 +2122,15 @@ class _RegisterItemPageState extends State<RegisterItemPage> {
     _itemNameController.dispose();
     _descriptionController.dispose();
     _lengthController.dispose();
-    _vendorsearchController.dispose();
     _bomItemSearchController.dispose();
     _componentQtyController.dispose();
     _sizeQtyController.dispose();
+    _currentStockController.dispose();
+    _lowStockThresholdController.dispose();
+    _wireCostPriceController.dispose();
+    _wireSalePriceController.dispose();
+    _wireStockController.dispose();
+    _wireLowStockController.dispose();
     super.dispose();
   }
 }

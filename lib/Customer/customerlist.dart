@@ -1766,7 +1766,8 @@ class _CustomerListState extends State<CustomerList> {
                           _chequeNumberController.text,
                           'chequeDate':
                           _selectedChequeDate!.toIso8601String(),
-                          'status': 'pending',
+                          'status': 'cleared',                    // ← was 'pending'
+                          'clearedAt': _selectedPaymentDate.toIso8601String(), // ← optional audit
                           'createdAt':
                           _selectedPaymentDate.toIso8601String(),
                           'bankName': _selectedBankName,

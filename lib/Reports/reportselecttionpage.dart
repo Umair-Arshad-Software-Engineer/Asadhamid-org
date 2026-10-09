@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:mughal_group_branch_two/Reports/profit_loss_page.dart';
 import 'package:mughal_group_branch_two/Reports/profitmargin.dart';
 import 'package:provider/provider.dart';
 import '../Provider/lanprovider.dart';
@@ -18,7 +19,7 @@ class ReportsPage extends StatelessWidget {
     } else if (reportType == 'Filled Reports') {
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => ProfitAnalysisPage()),
+        MaterialPageRoute(builder: (_) => ProfitLossPage()),
       );
     }
   }

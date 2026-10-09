@@ -2,7 +2,7 @@
 //
 // Items-wise Mazdoor ledger report. Same visual design as
 // ItemsWiseLedgerReportPage (customer version), but each "item row" is
-// either a wire line given out (debit-side) or a bolt-return line
+// either a wire line given out (debit-side) or a bolt/wire-return line
 // (credit-side), plus interleaved non-item rows (cash payments,
 // opening balance) so the running balance stays readable.
 
@@ -17,6 +17,7 @@ import 'package:printing/printing.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:universal_html/html.dart' as html;
 
+import '../Provider/Mazdoorprovider ·.dart';
 import '../Provider/lanprovider.dart';
 import '../Provider/mazdoorreportprovider.dart';
 
@@ -49,18 +50,112 @@ class _MazdoorItemsWiseLedgerPageState
     switch (kind) {
       case 'wire_given':
         return lp.isEnglish ? 'Wire Given' : 'وائر';
+      case 'bolt_given':
+        return lp.isEnglish ? 'Bolts Given' : 'بولٹس دیے گئے';
+      case 'cash_given':
+        return lp.isEnglish ? 'Cash Given' : 'نقد دیا گیا';
       case 'bolt_return':
         return lp.isEnglish ? 'Bolts' : 'بولٹس';
       case 'cash_payment':
         return lp.isEnglish ? 'Cash Payment' : 'نقد ادائیگی';
+      case 'wire_return':
+        return lp.isEnglish ? 'Wire Returned' : 'وائر واپس';
       default:
         return lp.isEnglish ? 'Adjustment' : 'ایڈجسٹمنٹ';
     }
   }
 
+  Future<void> _confirmDeleteItemWiseEntry(
+      MazdoorLedgerReportProvider provider,
+      Map<String, dynamic> row,
+      LanguageProvider lp,
+      ) async {
+    final entryKey = row['entryKey']?.toString() ?? '';
+    if (entryKey.isEmpty) return;
+
+    final kind = row['itemKind']?.toString() ?? '';
+
+    String warningExtra = '';
+    if (kind == 'bolt_return' || kind == 'wire_return') {
+      warningExtra = lp.isEnglish
+          ? '\n\nThis will also remove the returned stock and deactivate the auto-created batch.'
+          : '\n\nیہ واپس شدہ اسٹاک بھی ہٹا دے گا اور خودکار بنایا گیا بیچ بند کر دے گا۔';
+    } else if (kind == 'wire_given' || kind == 'bolt_given') {
+      warningExtra = lp.isEnglish
+          ? '\n\nThis will restore the wire stock back into items/batches.'
+          : '\n\nیہ وائر اسٹاک کو دوبارہ آئٹمز/بیچز میں بحال کر دے گا۔';
+    }
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape:
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded,
+                color: Colors.red, size: 24),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                lp.isEnglish ? 'Delete Entry?' : 'اندراج حذف کریں؟',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          lp.isEnglish
+              ? 'Are you sure you want to delete this ledger entry?$warningExtra'
+              : 'کیا آپ واقعی یہ کھاتہ اندراج حذف کرنا چاہتے ہیں؟$warningExtra',
+          style: const TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(lp.isEnglish ? 'Cancel' : 'منسوخ کریں'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(lp.isEnglish ? 'Delete' : 'حذف کریں'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    try {
+      final mp = Provider.of<MazdoorProvider>(context, listen: false);
+      await mp.deleteLedgerEntry(
+        mazdoorId: widget.mazdoorId,
+        entryKey: entryKey,
+      );
+      await provider.fetchMazdoorReport();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(lp.isEnglish ? 'Entry deleted' : 'اندراج حذف ہو گیا'),
+          backgroundColor: Colors.green,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Delete failed: $e'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
 
     return ChangeNotifierProvider(
       create: (_) => MazdoorLedgerReportProvider(widget.mazdoorId)
@@ -68,7 +163,9 @@ class _MazdoorItemsWiseLedgerPageState
       child: Scaffold(
         appBar: AppBar(
           title: Text(
-            languageProvider.isEnglish ? 'Mazdoor Items Wise Ledger' : 'مزدور آئٹم وار کھاتہ',
+            languageProvider.isEnglish
+                ? 'Mazdoor Items Wise Ledger'
+                : 'مزدور آئٹم وار کھاتہ',
             style: const TextStyle(color: Colors.white),
           ),
           flexibleSpace: Container(
@@ -85,7 +182,8 @@ class _MazdoorItemsWiseLedgerPageState
               builder: (context, provider, child) {
                 return IconButton(
                   icon: const Icon(Icons.print),
-                  onPressed: () => _generateAndPrintPDF(provider, languageProvider),
+                  onPressed: () =>
+                      _generateAndPrintPDF(provider, languageProvider),
                 );
               },
             ),
@@ -107,7 +205,8 @@ class _MazdoorItemsWiseLedgerPageState
               if (provider.isLoading) {
                 return Center(
                   child: CircularProgressIndicator(
-                    valueColor: AlwaysStoppedAnimation(const Color(0xFF2196F3)),
+                    valueColor:
+                    AlwaysStoppedAnimation(const Color(0xFF2196F3)),
                   ),
                 );
               }
@@ -116,8 +215,14 @@ class _MazdoorItemsWiseLedgerPageState
               }
 
               final rows = provider.itemWiseRows;
-              final totalItems = rows.where((r) => r['isItem'] == true).length;
-              final totalPayments = rows.where((r) => r['isItem'] == false && (r['debit'] as double) == 0 && (r['credit'] as double) > 0).length;
+              final totalItems =
+                  rows.where((r) => r['isItem'] == true).length;
+              final totalPayments = rows
+                  .where((r) =>
+              r['isItem'] == false &&
+                  (r['debit'] as double) == 0 &&
+                  (r['credit'] as double) > 0)
+                  .length;
 
               return SingleChildScrollView(
                 child: Padding(
@@ -125,12 +230,16 @@ class _MazdoorItemsWiseLedgerPageState
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _buildMazdoorInfo(context, languageProvider, provider),
+                      _buildMazdoorInfo(
+                          context, languageProvider, provider),
                       _buildDateRangeSelector(languageProvider),
                       _buildSummaryCards(provider),
                       Text(
                         'No. of Entries: ${rows.length + (provider.openingBalance != 0 ? 1 : 0)} (Filtered)',
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleSmall
+                            ?.copyWith(
                           color: const Color(0xFF1976D2),
                           fontSize: 12,
                         ),
@@ -138,7 +247,10 @@ class _MazdoorItemsWiseLedgerPageState
                       const SizedBox(height: 8),
                       Text(
                         'Total Items: $totalItems | Total Payments: $totalPayments',
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleSmall
+                            ?.copyWith(
                           color: const Color(0xFF1976D2),
                           fontSize: 12,
                         ),
@@ -161,22 +273,26 @@ class _MazdoorItemsWiseLedgerPageState
   // ─────────────────────────────────────────────────────────────
 
   Future<void> _generateAndPrintPDF(
-      MazdoorLedgerReportProvider provider, LanguageProvider languageProvider) async {
+      MazdoorLedgerReportProvider provider,
+      LanguageProvider languageProvider) async {
     try {
       final pdf = pw.Document();
 
       Uint8List? logoBytes;
       try {
-        final ByteData bytes = await rootBundle.load('assets/images/logo.png');
+        final ByteData bytes =
+        await rootBundle.load('assets/images/logo.png');
         logoBytes = bytes.buffer.asUint8List();
       } catch (_) {}
 
-      final itemsTableWidget = _buildPDFItemsWiseTable(provider, languageProvider);
+      final itemsTableWidget =
+      _buildPDFItemsWiseTable(provider, languageProvider);
 
       pdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
-          margin: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 20),
+          margin:
+          const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 20),
           build: (pw.Context context) {
             return [
               pw.Header(
@@ -184,11 +300,13 @@ class _MazdoorItemsWiseLedgerPageState
                 child: pw.Row(
                   children: [
                     if (logoBytes != null)
-                      pw.Image(pw.MemoryImage(logoBytes), width: 150, height: 100),
+                      pw.Image(pw.MemoryImage(logoBytes),
+                          width: 150, height: 100),
                     pw.Spacer(),
                     pw.Text(
                       'Mazdoor Items Wise Statement',
-                      style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
+                      style: pw.TextStyle(
+                          fontSize: 20, fontWeight: pw.FontWeight.bold),
                     ),
                   ],
                 ),
@@ -202,10 +320,14 @@ class _MazdoorItemsWiseLedgerPageState
                       crossAxisAlignment: pw.CrossAxisAlignment.start,
                       children: [
                         pw.Text('Mazdoor: ${widget.mazdoorName}',
-                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                        if (widget.mazdoorPhone.isNotEmpty) pw.Text('Phone: ${widget.mazdoorPhone}'),
-                        if (widget.mazdoorAddress.isNotEmpty) pw.Text('Address: ${widget.mazdoorAddress}'),
-                        if (widget.mazdoorCity.isNotEmpty) pw.Text('City: ${widget.mazdoorCity}'),
+                            style: pw.TextStyle(
+                                fontWeight: pw.FontWeight.bold)),
+                        if (widget.mazdoorPhone.isNotEmpty)
+                          pw.Text('Phone: ${widget.mazdoorPhone}'),
+                        if (widget.mazdoorAddress.isNotEmpty)
+                          pw.Text('Address: ${widget.mazdoorAddress}'),
+                        if (widget.mazdoorCity.isNotEmpty)
+                          pw.Text('City: ${widget.mazdoorCity}'),
                       ],
                     ),
                   ),
@@ -215,13 +337,16 @@ class _MazdoorItemsWiseLedgerPageState
                       children: [
                         pw.Text(
                             'Date Range: ${provider.isFiltered && provider.dateRangeFilter != null ? '${DateFormat('dd MMM yy').format(provider.dateRangeFilter!.start)} - ${DateFormat('dd MMM yy').format(provider.dateRangeFilter!.end)}' : 'All Transactions'}'),
-                        pw.Text('Generated: ${DateFormat('dd MMM yyyy hh:mm a').format(DateTime.now())}'),
+                        pw.Text(
+                            'Generated: ${DateFormat('dd MMM yyyy hh:mm a').format(DateTime.now())}'),
                       ],
                     ),
                   ),
                 ],
               ),
-              pw.Header(level: 1, child: pw.Text('Items Wise Transaction Details')),
+              pw.Header(
+                  level: 1,
+                  child: pw.Text('Items Wise Transaction Details')),
               itemsTableWidget,
             ];
           },
@@ -231,13 +356,16 @@ class _MazdoorItemsWiseLedgerPageState
       await _printPDF(pdf);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error generating PDF: $e'), backgroundColor: Colors.red),
+        SnackBar(
+            content: Text('Error generating PDF: $e'),
+            backgroundColor: Colors.red),
       );
     }
   }
 
   pw.Widget _buildPDFItemsWiseTable(
-      MazdoorLedgerReportProvider provider, LanguageProvider languageProvider) {
+      MazdoorLedgerReportProvider provider,
+      LanguageProvider languageProvider) {
     final openingBalanceDisplay = provider.displayOpeningBalance;
     final rows = provider.itemWiseRows;
 
@@ -256,15 +384,27 @@ class _MazdoorItemsWiseLedgerPageState
         child: pw.Row(
           mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
           children: [
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Date' : 'ڈیٹ', 55),
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Job No.' : 'کام نمبر', 50),
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Item Name' : 'آئٹم کا نام', 110),
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Type' : 'قسم', 55),
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Qty' : 'مقدار', 35),
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Unit Price' : 'یونٹ قیمت', 50),
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Debit' : 'ڈیبٹ', 50),
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Credit' : 'کریڈٹ', 50),
-            _buildPdfHeaderCell(languageProvider.isEnglish ? 'Balance' : 'بیلنس', 55),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Date' : 'ڈیٹ', 48),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Job No.' : 'کام نمبر', 42),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Item / Size' : 'آئٹم / سائز',
+                105),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Type' : 'قسم', 50),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Qty' : 'مقدار', 32),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Tot. Wt' : 'کل وزن', 48),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Price/kg' : 'فی کلو', 45),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Debit' : 'ڈیبٹ', 45),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Credit' : 'کریڈٹ', 45),
+            _buildPdfHeaderCell(
+                languageProvider.isEnglish ? 'Balance' : 'بیلنس', 50),
           ],
         ),
       ),
@@ -273,9 +413,12 @@ class _MazdoorItemsWiseLedgerPageState
     bool openingBalanceAdded = false;
     final openingBalanceDate = provider.displayOpeningBalanceDate;
 
-    if ((openingBalanceDisplay != 0 || !provider.isFiltered) && openingBalanceDate != null) {
-      if (rows.isEmpty || openingBalanceDate.isBefore(rows.first['date'] as DateTime)) {
-        pdfRows.add(_buildOpeningBalancePdfRow(provider, languageProvider, openingBalanceDisplay));
+    if ((openingBalanceDisplay != 0 || !provider.isFiltered) &&
+        openingBalanceDate != null) {
+      if (rows.isEmpty ||
+          openingBalanceDate.isBefore(rows.first['date'] as DateTime)) {
+        pdfRows.add(_buildOpeningBalancePdfRow(
+            provider, languageProvider, openingBalanceDisplay));
         openingBalanceAdded = true;
       }
     }
@@ -287,17 +430,27 @@ class _MazdoorItemsWiseLedgerPageState
           openingBalanceDate != null &&
           openingBalanceDate.isBefore(date) &&
           (openingBalanceDisplay != 0 || !provider.isFiltered)) {
-        pdfRows.add(_buildOpeningBalancePdfRow(provider, languageProvider, openingBalanceDisplay));
+        pdfRows.add(_buildOpeningBalancePdfRow(
+            provider, languageProvider, openingBalanceDisplay));
         openingBalanceAdded = true;
       }
 
       final isItem = r['isItem'] == true;
       final itemName = r['itemName']?.toString() ?? '-';
       final kind = _kindLabel(r['itemKind']?.toString(), languageProvider);
-      final quantity = isItem ? (r['quantity'] as double? ?? 0.0).toStringAsFixed(2) : '-';
-      final unitPrice = isItem && (r['unitPrice'] as double? ?? 0.0) > 0
-          ? 'Rs ${(r['unitPrice'] as double).toStringAsFixed(2)}'
+
+      final qty = (r['quantity'] as num?)?.toDouble() ?? 0.0;
+      final qtyText = isItem ? qty.toStringAsFixed(2) : '-';
+
+      final totalWt = (r['totalWeight'] as num?)?.toDouble() ?? 0.0;
+      final totalWtText = isItem && totalWt > 0
+          ? '${totalWt.toStringAsFixed(2)} kg'
           : '-';
+
+      final rate = (r['unitPrice'] as num?)?.toDouble() ?? 0.0;
+      final rateText =
+      isItem && rate > 0 ? 'Rs ${rate.toStringAsFixed(2)}' : '-';
+
       final debit = (r['debit'] as double?) ?? 0.0;
       final credit = (r['credit'] as double?) ?? 0.0;
       final balance = (r['balance'] as double?) ?? 0.0;
@@ -306,33 +459,49 @@ class _MazdoorItemsWiseLedgerPageState
         pw.Container(
           padding: const pw.EdgeInsets.all(6),
           decoration: const pw.BoxDecoration(
-            border: pw.Border(bottom: pw.BorderSide(color: PdfColors.grey300, width: 0.5)),
+            border: pw.Border(
+                bottom:
+                pw.BorderSide(color: PdfColors.grey300, width: 0.5)),
           ),
           child: pw.Row(
             mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
             children: [
-              _buildPdfDataCell(DateFormat('dd MMM yyyy').format(date), 55),
-              _buildPdfDataCell(r['invoiceNumber']?.toString() ?? '-', 50,
-                  textColor: PdfColors.blue800, fontWeight: pw.FontWeight.bold),
-              _buildPdfDataCell(itemName, 110),
-              _buildPdfDataCell(kind, 55),
-              _buildPdfDataCell(quantity, 35),
-              _buildPdfDataCell(unitPrice, 50, textAlign: pw.TextAlign.right),
+              _buildPdfDataCell(
+                  DateFormat('dd MMM yyyy').format(date), 48),
+              _buildPdfDataCell(
+                  r['invoiceNumber']?.toString() ?? '-', 42,
+                  textColor: PdfColors.blue800,
+                  fontWeight: pw.FontWeight.bold),
+              _buildPdfDataCell(itemName, 105),
+              _buildPdfDataCell(kind, 50),
+              _buildPdfDataCell(qtyText, 32),
+              _buildPdfDataCell(totalWtText, 48,
+                  textAlign: pw.TextAlign.right,
+                  textColor: isItem && totalWt > 0
+                      ? PdfColors.blue800
+                      : PdfColors.black),
+              _buildPdfDataCell(rateText, 45,
+                  textAlign: pw.TextAlign.right,
+                  textColor: isItem && rate > 0
+                      ? PdfColors.deepPurple800
+                      : PdfColors.black),
               _buildPdfDataCell(
                 debit > 0 ? 'Rs ${debit.toStringAsFixed(2)}' : '-',
-                50,
-                textColor: debit > 0 ? PdfColors.orange800 : PdfColors.black,
+                45,
+                textColor:
+                debit > 0 ? PdfColors.orange800 : PdfColors.black,
                 textAlign: pw.TextAlign.right,
               ),
               _buildPdfDataCell(
                 credit > 0 ? 'Rs ${credit.toStringAsFixed(2)}' : '-',
-                50,
-                textColor: credit > 0 ? PdfColors.green800 : PdfColors.black,
+                45,
+                textColor:
+                credit > 0 ? PdfColors.green800 : PdfColors.black,
                 textAlign: pw.TextAlign.right,
               ),
               _buildPdfDataCell(
                 'Rs ${balance.toStringAsFixed(2)}',
-                55,
+                50,
                 fontWeight: pw.FontWeight.bold,
                 textColor: PdfColors.teal800,
                 textAlign: pw.TextAlign.right,
@@ -346,44 +515,50 @@ class _MazdoorItemsWiseLedgerPageState
     if (!openingBalanceAdded &&
         (openingBalanceDisplay != 0 || !provider.isFiltered) &&
         openingBalanceDate != null) {
-      pdfRows.add(_buildOpeningBalancePdfRow(provider, languageProvider, openingBalanceDisplay));
+      pdfRows.add(_buildOpeningBalancePdfRow(
+          provider, languageProvider, openingBalanceDisplay));
     }
 
     pdfRows.add(
       pw.Container(
         padding: const pw.EdgeInsets.all(6),
         decoration: const pw.BoxDecoration(
-          border: pw.Border(top: pw.BorderSide(color: PdfColors.blue, width: 1.5)),
+          border:
+          pw.Border(top: pw.BorderSide(color: PdfColors.blue, width: 1.5)),
         ),
         child: pw.Row(
           mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
           children: [
-            _buildPdfDataCell(languageProvider.isEnglish ? 'TOTALS' : 'کل', 55,
+            _buildPdfDataCell(
+                languageProvider.isEnglish ? 'TOTALS' : 'کل', 48,
                 fontWeight: pw.FontWeight.bold),
+            _buildPdfDataCell('', 42),
+            _buildPdfDataCell('', 105),
             _buildPdfDataCell('', 50),
-            _buildPdfDataCell('', 110),
-            _buildPdfDataCell('', 55),
-            _buildPdfDataCell('', 35),
-            _buildPdfDataCell('', 50),
+            _buildPdfDataCell('', 32),
+            _buildPdfDataCell('', 48),
+            _buildPdfDataCell('', 45),
             _buildPdfDataCell(
               'Rs ${totalDebit.toStringAsFixed(2)}',
-              50,
+              45,
               fontWeight: pw.FontWeight.bold,
               textColor: PdfColors.orange800,
               textAlign: pw.TextAlign.right,
             ),
             _buildPdfDataCell(
               'Rs ${totalCredit.toStringAsFixed(2)}',
-              50,
+              45,
               fontWeight: pw.FontWeight.bold,
               textColor: PdfColors.green800,
               textAlign: pw.TextAlign.right,
             ),
             _buildPdfDataCell(
               'Rs ${displayFinalBalance.toStringAsFixed(2)}',
-              55,
+              50,
               fontWeight: pw.FontWeight.bold,
-              textColor: displayFinalBalance >= 0 ? PdfColors.green : PdfColors.red,
+              textColor: displayFinalBalance >= 0
+                  ? PdfColors.green
+                  : PdfColors.red,
               textAlign: pw.TextAlign.right,
             ),
           ],
@@ -395,7 +570,9 @@ class _MazdoorItemsWiseLedgerPageState
   }
 
   pw.Widget _buildOpeningBalancePdfRow(
-      MazdoorLedgerReportProvider provider, LanguageProvider languageProvider, double displayValue) {
+      MazdoorLedgerReportProvider provider,
+      LanguageProvider languageProvider,
+      double displayValue) {
     return pw.Container(
       padding: const pw.EdgeInsets.all(6),
       decoration: const pw.BoxDecoration(color: PdfColors.grey100),
@@ -404,31 +581,33 @@ class _MazdoorItemsWiseLedgerPageState
         children: [
           _buildPdfDataCell(
             provider.displayOpeningBalanceDate != null
-                ? DateFormat('dd MMM yyyy').format(provider.displayOpeningBalanceDate!)
+                ? DateFormat('dd MMM yyyy')
+                .format(provider.displayOpeningBalanceDate!)
                 : '-',
-            55,
+            48,
           ),
-          _buildPdfDataCell('-', 50),
+          _buildPdfDataCell('-', 42),
           _buildPdfDataCell(
             languageProvider.isEnglish
                 ? provider.openingBalanceLabel
                 : (provider.isFiltered ? 'پچھلا بیلنس' : 'ابتدائی بیلنس'),
-            110,
+            105,
           ),
-          _buildPdfDataCell('-', 55),
-          _buildPdfDataCell('-', 35),
           _buildPdfDataCell('-', 50),
-          _buildPdfDataCell('-', 50),
+          _buildPdfDataCell('-', 32),
+          _buildPdfDataCell('-', 48),
+          _buildPdfDataCell('-', 45),
+          _buildPdfDataCell('-', 45),
           _buildPdfDataCell(
             'Rs ${displayValue.toStringAsFixed(2)}',
-            50,
+            45,
             textColor: displayValue >= 0 ? PdfColors.green : PdfColors.red,
             fontWeight: pw.FontWeight.bold,
             textAlign: pw.TextAlign.right,
           ),
           _buildPdfDataCell(
             'Rs ${displayValue.toStringAsFixed(2)}',
-            55,
+            50,
             textColor: displayValue >= 0 ? PdfColors.green : PdfColors.red,
             fontWeight: pw.FontWeight.bold,
             textAlign: pw.TextAlign.right,
@@ -447,7 +626,10 @@ class _MazdoorItemsWiseLedgerPageState
       ),
       child: pw.Text(
         text,
-        style: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.blue800, fontSize: 9),
+        style: pw.TextStyle(
+            fontWeight: pw.FontWeight.bold,
+            color: PdfColors.blue800,
+            fontSize: 9),
         textAlign: pw.TextAlign.center,
       ),
     );
@@ -468,7 +650,10 @@ class _MazdoorItemsWiseLedgerPageState
       ),
       child: pw.Text(
         text,
-        style: pw.TextStyle(fontSize: 8, color: textColor ?? PdfColors.black, fontWeight: fontWeight),
+        style: pw.TextStyle(
+            fontSize: 8,
+            color: textColor ?? PdfColors.black,
+            fontWeight: fontWeight),
         textAlign: textAlign,
         maxLines: 2,
       ),
@@ -481,27 +666,34 @@ class _MazdoorItemsWiseLedgerPageState
         final bytes = await pdf.save();
         final blob = html.Blob([bytes], 'application/pdf');
         final url = html.Url.createObjectUrlFromBlob(blob);
-        final anchor = html.document.createElement('a') as html.AnchorElement
+        final anchor =
+        html.document.createElement('a') as html.AnchorElement
           ..href = url
           ..style.display = 'none'
-          ..download = 'mazdoor_items_wise_${widget.mazdoorName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf';
+          ..download =
+              'mazdoor_items_wise_${widget.mazdoorName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf';
         html.document.body?.children.add(anchor);
         anchor.click();
         html.document.body?.children.remove(anchor);
         html.Url.revokeObjectUrl(url);
 
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('PDF downloaded successfully!'), backgroundColor: Colors.green),
+          const SnackBar(
+              content: Text('PDF downloaded successfully!'),
+              backgroundColor: Colors.green),
         );
       } else {
         await Printing.layoutPdf(
           onLayout: (PdfPageFormat format) async => pdf.save(),
-          name: 'mazdoor_items_wise_${widget.mazdoorName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf',
+          name:
+          'mazdoor_items_wise_${widget.mazdoorName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf',
         );
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error printing PDF: $e'), backgroundColor: Colors.red),
+        SnackBar(
+            content: Text('Error printing PDF: $e'),
+            backgroundColor: Colors.red),
       );
     }
   }
@@ -510,8 +702,8 @@ class _MazdoorItemsWiseLedgerPageState
   // UI
   // ─────────────────────────────────────────────────────────────
 
-  Widget _buildMazdoorInfo(
-      BuildContext context, LanguageProvider languageProvider, MazdoorLedgerReportProvider provider) {
+  Widget _buildMazdoorInfo(BuildContext context,
+      LanguageProvider languageProvider, MazdoorLedgerReportProvider provider) {
     final isMobile = MediaQuery.of(context).size.width < 600;
 
     return Center(
@@ -526,13 +718,16 @@ class _MazdoorItemsWiseLedgerPageState
             ),
           ),
           if (widget.mazdoorPhone.isNotEmpty)
-            Text('${languageProvider.isEnglish ? 'Phone Number:' : 'فون نمبر:'} ${widget.mazdoorPhone}',
+            Text(
+                '${languageProvider.isEnglish ? 'Phone Number:' : 'فون نمبر:'} ${widget.mazdoorPhone}',
                 style: const TextStyle(color: Color(0xFF2196F3))),
           if (widget.mazdoorAddress.isNotEmpty)
-            Text('${languageProvider.isEnglish ? 'Address:' : 'پتہ:'} ${widget.mazdoorAddress}',
+            Text(
+                '${languageProvider.isEnglish ? 'Address:' : 'پتہ:'} ${widget.mazdoorAddress}',
                 style: const TextStyle(color: Color(0xFF2196F3))),
           if (widget.mazdoorCity.isNotEmpty)
-            Text('${languageProvider.isEnglish ? 'City:' : 'شہر:'} ${widget.mazdoorCity}',
+            Text(
+                '${languageProvider.isEnglish ? 'City:' : 'شہر:'} ${widget.mazdoorCity}',
                 style: const TextStyle(color: Color(0xFF2196F3))),
           const SizedBox(height: 10),
           Text(
@@ -565,7 +760,9 @@ class _MazdoorItemsWiseLedgerPageState
                 }
               },
               icon: const Icon(Icons.date_range),
-              label: Text(languageProvider.isEnglish ? 'Select Date Range' : 'تاریخ منتخب کریں'),
+              label: Text(languageProvider.isEnglish
+                  ? 'Select Date Range'
+                  : 'تاریخ منتخب کریں'),
               style: ElevatedButton.styleFrom(
                 foregroundColor: Colors.white,
                 backgroundColor: const Color(0xFF2196F3),
@@ -591,8 +788,9 @@ class _MazdoorItemsWiseLedgerPageState
     final debit = report['debit'] ?? 0.0;
     final credit = report['credit'] ?? 0.0;
     final balance = report['balance'] ?? 0.0;
-    final displayBalance =
-    provider.isFiltered && provider.itemWiseRows.isEmpty ? provider.displayOpeningBalance : balance;
+    final displayBalance = provider.isFiltered && provider.itemWiseRows.isEmpty
+        ? provider.displayOpeningBalance
+        : balance;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 16.0),
@@ -617,7 +815,9 @@ class _MazdoorItemsWiseLedgerPageState
             title: displayBalance >= 0 ? 'Owes You' : 'You Owe',
             value: displayBalance.abs(),
             icon: Icons.account_balance_wallet,
-            color: displayBalance >= 0 ? const Color(0xFF64B5F6) : const Color(0xFFFFB74D),
+            color: displayBalance >= 0
+                ? const Color(0xFF64B5F6)
+                : const Color(0xFFFFB74D),
             isMobile: isMobile,
           ),
         ],
@@ -638,7 +838,9 @@ class _MazdoorItemsWiseLedgerPageState
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(12),
-          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2))],
+          boxShadow: const [
+            BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2))
+          ],
         ),
         child: Padding(
           padding: const EdgeInsets.all(16.0),
@@ -650,29 +852,38 @@ class _MazdoorItemsWiseLedgerPageState
                 children: [
                   Container(
                     padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(color: color.withOpacity(0.2), shape: BoxShape.circle),
+                    decoration: BoxDecoration(
+                        color: color.withOpacity(0.2),
+                        shape: BoxShape.circle),
                     child: Icon(icon, size: isMobile ? 20 : 24, color: color),
                   ),
                   Text(
                     'Rs ${value.toStringAsFixed(2)}',
                     style: TextStyle(
-                        fontSize: isMobile ? 14 : 18, fontWeight: FontWeight.bold, color: Colors.black87),
+                        fontSize: isMobile ? 14 : 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87),
                   ),
                 ],
               ),
               const SizedBox(height: 12),
-              Text(title, style: TextStyle(fontSize: isMobile ? 12 : 14, color: Colors.grey[600])),
+              Text(title,
+                  style: TextStyle(
+                      fontSize: isMobile ? 12 : 14, color: Colors.grey[600])),
               const SizedBox(height: 4),
               Container(
                 height: 4,
                 width: double.infinity,
-                decoration:
-                BoxDecoration(color: color.withOpacity(0.3), borderRadius: BorderRadius.circular(2)),
+                decoration: BoxDecoration(
+                    color: color.withOpacity(0.3),
+                    borderRadius: BorderRadius.circular(2)),
                 child: FractionallySizedBox(
                   alignment: Alignment.centerLeft,
-                  widthFactor: value > 10000 ? 1.0 : (value < 0 ? 0.0 : value / 10000),
+                  widthFactor:
+                  value > 10000 ? 1.0 : (value < 0 ? 0.0 : value / 10000),
                   child: Container(
-                    decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(2)),
+                    decoration: BoxDecoration(
+                        color: color, borderRadius: BorderRadius.circular(2)),
                   ),
                 ),
               ),
@@ -708,7 +919,8 @@ class _MazdoorItemsWiseLedgerPageState
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildCustomItemsWiseTable(rows, provider, isMobile, languageProvider),
+            _buildCustomItemsWiseTable(
+                rows, provider, isMobile, languageProvider),
           ],
         );
       },
@@ -735,15 +947,30 @@ class _MazdoorItemsWiseLedgerPageState
           ),
           child: Row(
             children: [
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Date' : 'ڈیٹ', 1),
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Job No.' : 'کام نمبر', 1),
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Item Name' : 'آئٹم کا نام', 2),
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Type' : 'قسم', 1),
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Qty' : 'مقدار', 0.8),
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Unit Price' : 'یونٹ قیمت', 1.2),
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Debit' : 'ڈیبٹ', 1),
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Credit' : 'کریڈٹ', 1),
-              _buildExpandedHeaderCell(languageProvider.isEnglish ? 'Balance' : 'بیلنس', 1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Date' : 'ڈیٹ', 1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Job No.' : 'کام نمبر', 1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Item / Size' : 'آئٹم / سائز',
+                  2.2),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Type' : 'قسم', 1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Qty' : 'مقدار', 0.7),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Total Wt' : 'کل وزن', 1.1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Price/kg' : 'فی کلو قیمت',
+                  1.1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Debit' : 'ڈیبٹ', 1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Credit' : 'کریڈٹ', 1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Balance' : 'بیلنس', 1),
+              _buildExpandedHeaderCell(
+                  languageProvider.isEnglish ? 'Action' : 'عمل', 0.6),
             ],
           ),
         ),
@@ -758,18 +985,25 @@ class _MazdoorItemsWiseLedgerPageState
                 (displayBalance != 0 || !provider.isFiltered) &&
                 openingBalanceDate != null &&
                 openingBalanceDate.isBefore(date)) {
-              widgetRows.add(_buildOpeningBalanceRow(provider, languageProvider, isMobile));
+              widgetRows.add(
+                  _buildOpeningBalanceRow(provider, languageProvider, isMobile));
               openingBalanceInserted = true;
             }
 
-            widgetRows.add(_buildExpandedItemRow(r, isMobile, languageProvider));
+            widgetRows.add(_buildExpandedItemRow(
+                r, provider, isMobile, languageProvider));
           }
 
-          if (!openingBalanceInserted && (displayBalance != 0 || !provider.isFiltered)) {
+          if (!openingBalanceInserted &&
+              (displayBalance != 0 || !provider.isFiltered)) {
             if (rows.isEmpty) {
-              widgetRows.insert(0, _buildOpeningBalanceRow(provider, languageProvider, isMobile));
+              widgetRows.insert(
+                  0,
+                  _buildOpeningBalanceRow(
+                      provider, languageProvider, isMobile));
             } else {
-              widgetRows.add(_buildOpeningBalanceRow(provider, languageProvider, isMobile));
+              widgetRows.add(
+                  _buildOpeningBalanceRow(provider, languageProvider, isMobile));
             }
           }
 
@@ -779,8 +1013,8 @@ class _MazdoorItemsWiseLedgerPageState
     );
   }
 
-  Widget _buildOpeningBalanceRow(
-      MazdoorLedgerReportProvider provider, LanguageProvider languageProvider, bool isMobile) {
+  Widget _buildOpeningBalanceRow(MazdoorLedgerReportProvider provider,
+      LanguageProvider languageProvider, bool isMobile) {
     final displayBalance = provider.displayOpeningBalance;
 
     return Container(
@@ -796,7 +1030,8 @@ class _MazdoorItemsWiseLedgerPageState
         children: [
           _buildExpandedDataCell(
             provider.displayOpeningBalanceDate != null
-                ? DateFormat('dd MMM yyyy').format(provider.displayOpeningBalanceDate!)
+                ? DateFormat('dd MMM yyyy')
+                .format(provider.displayOpeningBalanceDate!)
                 : '-',
             1,
             isMobile,
@@ -806,12 +1041,13 @@ class _MazdoorItemsWiseLedgerPageState
             languageProvider.isEnglish
                 ? provider.openingBalanceLabel
                 : (provider.isFiltered ? 'پچھلا بیلنس' : 'ابتدائی بیلنس'),
-            2,
+            2.2,
             isMobile,
           ),
           _buildExpandedDataCell('-', 1, isMobile),
-          _buildExpandedDataCell('-', 0.8, isMobile),
-          _buildExpandedDataCell('-', 1.2, isMobile),
+          _buildExpandedDataCell('-', 0.7, isMobile),
+          _buildExpandedDataCell('-', 1.1, isMobile),
+          _buildExpandedDataCell('-', 1.1, isMobile),
           _buildExpandedDataCell('-', 1, isMobile),
           _buildExpandedDataCell(
             'Rs ${displayBalance.toStringAsFixed(2)}',
@@ -827,6 +1063,7 @@ class _MazdoorItemsWiseLedgerPageState
             fontWeight: FontWeight.bold,
             textColor: displayBalance >= 0 ? Colors.green : Colors.red,
           ),
+          _buildExpandedDataCell('', 0.6, isMobile),
         ],
       ),
     );
@@ -837,10 +1074,14 @@ class _MazdoorItemsWiseLedgerPageState
       flex: (flexValue * 10).round(),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-        decoration: BoxDecoration(border: Border(right: BorderSide(color: Colors.grey[300]!))),
+        decoration: BoxDecoration(
+            border: Border(right: BorderSide(color: Colors.grey[300]!))),
         child: Text(
           text,
-          style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF1976D2), fontSize: 12),
+          style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF1976D2),
+              fontSize: 12),
           textAlign: TextAlign.center,
           overflow: TextOverflow.ellipsis,
         ),
@@ -850,20 +1091,44 @@ class _MazdoorItemsWiseLedgerPageState
 
   Widget _buildExpandedItemRow(
       Map<String, dynamic> r,
+      MazdoorLedgerReportProvider reportProvider,
       bool isMobile,
       LanguageProvider languageProvider,
       ) {
     final isItem = r['isItem'] == true;
     final date = r['date'] as DateTime;
     final invoiceNumber = r['invoiceNumber']?.toString() ?? '-';
-    final itemName = r['itemName']?.toString() ?? '-';
-    final quantity = isItem ? (r['quantity'] as double? ?? 0.0).toStringAsFixed(2) : '-';
-    final unitPrice = isItem && (r['unitPrice'] as double? ?? 0.0) > 0
-        ? 'Rs ${(r['unitPrice'] as double).toStringAsFixed(2)}'
-        : '-';
-    final debit = (r['debit'] as double?) ?? 0.0;
-    final credit = (r['credit'] as double?) ?? 0.0;
-    final balance = (r['balance'] as double?) ?? 0.0;
+
+    // ── Item / Size column data ──────────────────────────────────────────
+    final size = (r['size'] ?? '').toString().trim();
+    final length = (r['length'] ?? '').toString().trim();
+    final bodyType = (r['bodyType'] ?? '').toString().trim();
+    final itemNameRaw = (r['itemName'] ?? '').toString();
+
+    final String primaryLabel =
+    size.isNotEmpty ? size : (itemNameRaw.isNotEmpty ? itemNameRaw : '-');
+    final String subLabel = [
+      if (length.isNotEmpty) length,
+      if (bodyType.isNotEmpty) bodyType,
+    ].join(' - ');
+
+    // ── Qty ──────────────────────────────────────────────────────────────
+    final qty = (r['quantity'] as num?)?.toDouble() ?? 0.0;
+    final qtyText = isItem ? qty.toStringAsFixed(2) : '-';
+
+    // ── Total Weight ─────────────────────────────────────────────────────
+    final totalWt = (r['totalWeight'] as num?)?.toDouble() ?? 0.0;
+    final totalWtText =
+    isItem && totalWt > 0 ? '${totalWt.toStringAsFixed(2)} kg' : '-';
+
+    // ── Price / kg ───────────────────────────────────────────────────────
+    final rate = (r['unitPrice'] as num?)?.toDouble() ?? 0.0;
+    final rateText =
+    isItem && rate > 0 ? 'Rs ${rate.toStringAsFixed(2)}' : '-';
+
+    final debit = (r['debit'] as num?)?.toDouble() ?? 0.0;
+    final credit = (r['credit'] as num?)?.toDouble() ?? 0.0;
+    final balance = (r['balance'] as num?)?.toDouble() ?? 0.0;
 
     return Container(
       decoration: BoxDecoration(
@@ -876,7 +1141,8 @@ class _MazdoorItemsWiseLedgerPageState
       ),
       child: Row(
         children: [
-          _buildExpandedDataCell(DateFormat('dd MMM yyyy').format(date), 1, isMobile),
+          _buildExpandedDataCell(
+              DateFormat('dd MMM yyyy').format(date), 1, isMobile),
           _buildExpandedDataCell(
             invoiceNumber,
             1,
@@ -884,10 +1150,66 @@ class _MazdoorItemsWiseLedgerPageState
             textColor: Colors.blue[700],
             fontWeight: FontWeight.w500,
           ),
-          _buildExpandedDataCell(itemName, 2, isMobile),
-          _buildExpandedDataCell(_kindLabel(r['itemKind']?.toString(), languageProvider), 1, isMobile),
-          _buildExpandedDataCell(quantity, 0.8, isMobile),
-          _buildExpandedDataCell(unitPrice, 1.2, isMobile, textAlign: TextAlign.right),
+          _buildExpandedDataCell(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  primaryLabel,
+                  style: TextStyle(
+                    fontSize: isMobile ? 10 : 12,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black87,
+                  ),
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (subLabel.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      subLabel,
+                      style: TextStyle(
+                        fontSize: isMobile ? 9 : 10,
+                        color: Colors.grey[600],
+                        fontStyle: FontStyle.italic,
+                      ),
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+            ),
+            2.2,
+            isMobile,
+          ),
+          _buildExpandedDataCell(
+              _kindLabel(r['itemKind']?.toString(), languageProvider),
+              1,
+              isMobile),
+          _buildExpandedDataCell(qtyText, 0.7, isMobile),
+          _buildExpandedDataCell(
+            totalWtText,
+            1.1,
+            isMobile,
+            textColor:
+            isItem && totalWt > 0 ? Colors.blue[700] : Colors.grey,
+            fontWeight:
+            isItem && totalWt > 0 ? FontWeight.w600 : FontWeight.normal,
+            textAlign: TextAlign.right,
+          ),
+          _buildExpandedDataCell(
+            rateText,
+            1.1,
+            isMobile,
+            textColor:
+            isItem && rate > 0 ? Colors.deepPurple[700] : Colors.grey,
+            fontWeight:
+            isItem && rate > 0 ? FontWeight.w600 : FontWeight.normal,
+            textAlign: TextAlign.right,
+          ),
           _buildExpandedDataCell(
             debit > 0 ? 'Rs ${debit.toStringAsFixed(2)}' : '-',
             1,
@@ -909,6 +1231,23 @@ class _MazdoorItemsWiseLedgerPageState
             fontWeight: FontWeight.bold,
             textAlign: TextAlign.right,
           ),
+          _buildExpandedDataCell(
+            IconButton(
+              icon: const Icon(Icons.delete_outline,
+                  color: Colors.red, size: 18),
+              tooltip: languageProvider.isEnglish ? 'Delete' : 'حذف کریں',
+              onPressed: (r['entryKey'] == null ||
+                  (r['entryKey'] as String).isEmpty)
+                  ? null
+                  : () => _confirmDeleteItemWiseEntry(
+                  reportProvider, r, languageProvider),
+              padding: EdgeInsets.zero,
+              constraints:
+              const BoxConstraints(minWidth: 32, minHeight: 32),
+            ),
+            0.6,
+            isMobile,
+          ),
         ],
       ),
     );
@@ -926,12 +1265,16 @@ class _MazdoorItemsWiseLedgerPageState
       flex: (flexValue * 10).round(),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-        decoration: BoxDecoration(border: Border(right: BorderSide(color: Colors.grey[300]!))),
+        decoration: BoxDecoration(
+            border: Border(right: BorderSide(color: Colors.grey[300]!))),
         child: content is Widget
             ? Center(child: content)
             : Text(
           content.toString(),
-          style: TextStyle(fontSize: isMobile ? 10 : 12, color: textColor ?? Colors.black87, fontWeight: fontWeight),
+          style: TextStyle(
+              fontSize: isMobile ? 10 : 12,
+              color: textColor ?? Colors.black87,
+              fontWeight: fontWeight),
           textAlign: textAlign,
           overflow: TextOverflow.ellipsis,
         ),

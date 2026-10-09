@@ -62,10 +62,6 @@ class MazdoorLedgerReportProvider with ChangeNotifier {
       credit += (e['credit'] as double? ?? 0.0);
     }
     final balance = displayOpeningBalance + credit - debit;
-    // NOTE: for the Mazdoor ledger, "balance" here is expressed in the
-    // same polarity as the running ledger balance (positive = they owe
-    // you), so credit reduces debt and debit increases it — the report
-    // cards below handle the visual framing (green=in your favor, etc).
     return {'debit': debit, 'credit': credit, 'balance': balance};
   }
 
@@ -74,7 +70,6 @@ class MazdoorLedgerReportProvider with ChangeNotifier {
   /// start (previous balance), else the account's true opening balance.
   double get displayOpeningBalance {
     if (!isFiltered) return openingBalance;
-    // Sum everything before the filter start.
     double debit = 0.0, credit = 0.0;
     for (final e in _allEntries) {
       final date = e['date'] as DateTime;
@@ -94,64 +89,159 @@ class MazdoorLedgerReportProvider with ChangeNotifier {
   String get openingBalanceLabel =>
       isFiltered ? 'Previous Balance' : 'Opening Balance';
 
-  /// Item-wise rows: wire lines given (debit-side) and bolt returns
+  /// Item-wise rows: wire lines given (debit-side) and bolt / wire returns
   /// (credit-side), each flattened into its own row like invoice items.
+  /// Non-item rows (cash, adjustments, opening balance) are also included
+  /// so the running balance stays readable.
   List<Map<String, dynamic>> get itemWiseRows {
     final rows = <Map<String, dynamic>>[];
     for (final e in transactions) {
-      if (e['entryType'] == 'wire_given' &&
-          e['wireLines'] != null &&
-          (e['wireLines'] as List).isNotEmpty) {
-        for (final line in (e['wireLines'] as List)) {
+      final entryType = e['entryType']?.toString() ?? '';
+
+      if (entryType == 'wire_given') {
+        final wireLines = e['wireLines'];
+        if (wireLines is List && wireLines.isNotEmpty) {
+          for (final line in wireLines) {
+            if (line is! Map) continue;
+            final l = Map<String, dynamic>.from(line);
+
+            final size = (l['itemName'] ?? '').toString();
+            final length = (l['length'] ?? '').toString();
+            final bodyType = (l['bodyType'] ?? '').toString();
+            final qty = (l['qty'] as num?)?.toDouble() ?? 0.0;
+            final wtPerUnit =
+                (l['weightPerUnit'] as num?)?.toDouble() ?? 0.0;
+            final totalWeight = (l['totalWeight'] as num?)?.toDouble() ??
+                (wtPerUnit > 0 ? wtPerUnit * qty : qty);
+            final weightUnit = (l['weightUnit'] ?? 'kg').toString();
+
+            rows.add({
+              'date': e['date'],
+              'invoiceNumber': e['jobNumber'],
+              'size': size,
+              'length': length,
+              'bodyType': bodyType,
+              'itemName': _composeItemLabel(size, length, bodyType),
+              'isItem': true,
+              'itemKind': 'wire_given',
+              'quantity': qty,
+              'totalWeight': totalWeight,
+              'weightUnit': weightUnit,
+              'unitPrice': 0.0,
+              'debit': 0.0,
+              'credit': 0.0,
+              'balance': e['balance'],
+              'paymentMethod': '-',
+              'entryKey': e['key'],
+            });
+          }
+        } else {
+          // Fallback: no wire lines stored — show a single summary row
           rows.add({
             'date': e['date'],
             'invoiceNumber': e['jobNumber'],
-            'itemName':
-            '${line['itemName']}${(line['length'] ?? '').toString().isNotEmpty ? ' (${line['length']} - ${line['bodyType'] ?? ''})' : ''}',
+            'size': '-',
+            'length': '',
+            'bodyType': '',
+            'itemName': e['description'] ?? 'Wire Given',
             'isItem': true,
             'itemKind': 'wire_given',
-            'quantity': (line['qty'] as num?)?.toDouble() ?? 0.0,
-            'unitPrice': 0.0, // wire lines don't carry a per-unit price
+            'quantity': 0.0,
+            'totalWeight': 0.0,
+            'weightUnit': 'kg',
+            'unitPrice': 0.0,
             'debit': 0.0,
             'credit': 0.0,
             'balance': e['balance'],
             'paymentMethod': '-',
+            'entryKey': e['key'],
           });
         }
-      } else if (e['entryType'] == 'bolt_return') {
+      } else if (entryType == 'bolt_return') {
+        final qty = (e['quantity'] as num?)?.toDouble() ?? 0.0;
+        final rate = (e['unitPrice'] as num?)?.toDouble() ?? 0.0;
+
         rows.add({
           'date': e['date'],
           'invoiceNumber': e['jobNumber'],
+          'size': e['itemName'] ?? '-',
+          'length': '',
+          'bodyType': '',
           'itemName': e['itemName'] ?? '-',
           'isItem': true,
           'itemKind': 'bolt_return',
-          'quantity': e['quantity'] ?? 0.0,
-          'unitPrice': e['unitPrice'] ?? 0.0,
+          'quantity': qty,
+          'totalWeight': qty,
+          'weightUnit': 'kg',
+          'unitPrice': rate,
           'debit': 0.0,
           'credit': e['credit'],
           'balance': e['balance'],
           'paymentMethod': '-',
+          'entryKey': e['key'],
         });
-      } else {
-        // Non-item rows (cash payment, opening balance, adjustment) still
-        // appear so the running balance stays readable, same as the
-        // Customer items-wise report keeps payment rows interleaved.
+      } else if (entryType == 'wire_return') {
+        final qty = (e['quantity'] as num?)?.toDouble() ?? 0.0;
+        final wt = (e['totalWeight'] as num?)?.toDouble() ?? qty;
+        final rate = (e['unitPrice'] as num?)?.toDouble() ?? 0.0;
+
         rows.add({
           'date': e['date'],
           'invoiceNumber': e['jobNumber'],
-          'itemName': e['description'] ?? _labelForType(e['entryType']),
+          'size': e['itemName'] ?? '-',
+          'length': '',
+          'bodyType': '',
+          'itemName': e['itemName'] ?? '-',
+          'isItem': true,
+          'itemKind': 'wire_return',
+          'quantity': qty,
+          'totalWeight': wt,
+          'weightUnit': 'kg',
+          'unitPrice': rate,
+          'debit': 0.0,
+          'credit': e['credit'],
+          'balance': e['balance'],
+          'paymentMethod': '-',
+          'entryKey': e['key'],
+        });
+      } else {
+        // Non-item rows (cash payment, adjustment)
+        rows.add({
+          'date': e['date'],
+          'invoiceNumber': e['jobNumber'],
+          'size': '-',
+          'length': '',
+          'bodyType': '',
+          'itemName': e['description'] ?? _labelForType(entryType),
           'isItem': false,
-          'itemKind': e['entryType'],
+          'itemKind': entryType,
           'quantity': 0.0,
+          'totalWeight': 0.0,
+          'weightUnit': 'kg',
           'unitPrice': 0.0,
           'debit': e['debit'],
           'credit': e['credit'],
           'balance': e['balance'],
-          'paymentMethod': e['entryType'] == 'cash_payment' ? 'Cash' : '-',
+          'paymentMethod': entryType == 'cash_payment' ? 'Cash' : '-',
+          'entryKey': e['key'],
         });
       }
     }
     return rows;
+  }
+
+  /// Compose a display label for the item name column, e.g.
+  /// "Wire 2.5mm (3½ - Full)".
+  String _composeItemLabel(String size, String length, String bodyType) {
+    final parts = <String>[];
+    if (size.isNotEmpty) parts.add(size);
+    if (length.isNotEmpty || bodyType.isNotEmpty) {
+      final sub = <String>[];
+      if (length.isNotEmpty) sub.add(length);
+      if (bodyType.isNotEmpty) sub.add(bodyType);
+      parts.add('(${sub.join(' - ')})');
+    }
+    return parts.isEmpty ? '-' : parts.join(' ');
   }
 
   String _labelForType(String type) {
@@ -185,9 +275,8 @@ class MazdoorLedgerReportProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      // Opening balance comes from the ledger's own 'opening_balance' row
-      // if present; otherwise 0.
-      final snapshot = await _db.child('mazdoorLedger').child(mazdoorId).get();
+      final snapshot =
+      await _db.child('mazdoorLedger').child(mazdoorId).get();
 
       if (!snapshot.exists || snapshot.value == null) {
         _allEntries = [];
@@ -218,30 +307,33 @@ class MazdoorLedgerReportProvider with ChangeNotifier {
         }
 
         final entryType = entry['entryType']?.toString() ?? 'adjustment';
-        // Back-compat: earlier builds stored 'jobNumber' instead of 'reference'.
-        final reference = (entry['reference'] ?? entry['jobNumber'])?.toString() ?? '';
+        final reference =
+            (entry['reference'] ?? entry['jobNumber'])?.toString() ?? '';
 
         if (entryType == 'opening_balance') {
           openingBalance = parseD(entry['debitFromMazdoor']) -
               parseD(entry['creditToMazdoor']);
           openingBalanceDate = parseDate(entry['createdAt']);
-          return; // not included as a regular transaction row
+          return;
         }
 
         entries.add({
           'key': key.toString(),
           'date': parseDate(entry['createdAt']),
-          'jobNumber': reference, // kept as 'jobNumber' key for UI compatibility
+          'jobNumber': reference,
           'entryType': entryType,
           'debit': parseD(entry['debitFromMazdoor']),
           'credit': parseD(entry['creditToMazdoor']),
           'balance': parseD(entry['remainingBalance']),
           'description': entry['description']?.toString(),
           'itemName': entry['itemName']?.toString(),
-          'quantity': entry['quantity'] != null ? parseD(entry['quantity']) : null,
-          'unitPrice': entry['rate'] != null ? parseD(entry['rate']) : null,
-          // wireLines now live directly on the ledger entry itself.
-          'wireLines': entry['wireLines'] is List ? entry['wireLines'] as List : null,
+          'quantity': entry['quantity'] != null
+              ? parseD(entry['quantity'])
+              : null,
+          'unitPrice':
+          entry['rate'] != null ? parseD(entry['rate']) : null,
+          'wireLines':
+          entry['wireLines'] is List ? entry['wireLines'] as List : null,
         });
       });
 

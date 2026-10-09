@@ -82,6 +82,9 @@ class _QuotationPageState extends State<QuotationPage> {
           'weightUnit': 'kg',
           'totalWeight': 0.0,
           'manualWeightEntry': false,
+          'batchId': null,
+          'batchNumber': null,
+          'availableBatchQty': null,
           'itemNameController': TextEditingController(),
           'rateController': TextEditingController(),
           'qtyController': TextEditingController(),
@@ -117,6 +120,184 @@ class _QuotationPageState extends State<QuotationPage> {
 // ============================================================
 // STEP 2: Add this helper method inside _QuotationPageState
 // ============================================================
+
+  Future<List<Map<String, dynamic>>> _fetchBatchesForItem(String itemName) async {
+    final database = FirebaseDatabase.instance.ref();
+    List<Map<String, dynamic>> batches = [];
+
+    try {
+      final snapshot = await database.child('batches').get();
+      if (snapshot.exists) {
+        final data = snapshot.value as Map<dynamic, dynamic>;
+        data.forEach((key, value) {
+          final batch = Map<String, dynamic>.from(value);
+
+          double quantity = 0.0;
+          if (batch['quantity'] != null) {
+            quantity = (batch['quantity'] as num).toDouble();
+          }
+
+          bool isActive = batch['isActive'] == true;
+
+          if (batch['itemName'] == itemName &&
+              quantity > 0 &&
+              isActive) {
+            double purchasePrice = 0.0;
+            if (batch['purchasePrice'] != null) {
+              purchasePrice = (batch['purchasePrice'] as num).toDouble();
+            } else if (batch['costPrice'] != null) {
+              purchasePrice = (batch['costPrice'] as num).toDouble();
+            }
+
+            batches.add({
+              'id': key,
+              'itemName': batch['itemName'] ?? '',
+              'itemKey': batch['itemKey'] ?? '',
+              'batchNumber': batch['batchNumber'] ?? 'N/A',
+              'quantity': quantity,
+              'remainingQty': quantity,
+              'purchasePrice': purchasePrice,
+              'costPrice': purchasePrice,
+              'purchaseDate': batch['timestamp']?.toString() ??
+                  DateTime.now().toIso8601String(),
+              'isActive': isActive,
+              'vendorName': batch['vendorName'] ?? 'N/A',
+              'length': batch['length']?.toString() ?? '',
+              'bodyType': batch['bodyType']?.toString() ?? '',
+            });
+          }
+        });
+        batches.sort((a, b) {
+          try {
+            return DateTime.parse(a['purchaseDate'])
+                .compareTo(DateTime.parse(b['purchaseDate']));
+          } catch (e) {
+            return 0;
+          }
+        });
+      }
+    } catch (e) {
+      print('Error fetching batches: $e');
+    }
+    return batches;
+  }
+
+  Future<void> _showBatchSelectionDialog(int index, String itemName) async {
+    final batches = await _fetchBatchesForItem(itemName);
+    final languageProvider =
+    Provider.of<LanguageProvider>(context, listen: false);
+
+    if (batches.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(languageProvider.isEnglish
+                ? 'No batches available for $itemName'
+                : '$itemName کے لیے کوئی بیچ دستیاب نہیں')),
+      );
+      return;
+    }
+
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(languageProvider.isEnglish
+            ? 'Select Batch for $itemName'
+            : '$itemName کے لیے بیچ منتخب کریں'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 400,
+          child: ListView.builder(
+            itemCount: batches.length,
+            itemBuilder: (context, i) {
+              final batch = batches[i];
+
+              final qty =
+                  (batch['quantity'] as num?)?.toDouble() ?? 0.0;
+              final purchasePrice =
+                  (batch['purchasePrice'] as num?)?.toDouble() ?? 0.0;
+
+              String purchaseDateStr = batch['purchaseDate']?.toString() ??
+                  DateTime.now().toIso8601String();
+
+              DateTime purchaseDate;
+              try {
+                purchaseDate = DateTime.parse(purchaseDateStr);
+              } catch (e) {
+                purchaseDate = DateTime.now();
+              }
+
+              final batchNumber =
+                  batch['batchNumber']?.toString() ?? 'Batch ${i + 1}';
+              final vendorName = batch['vendorName']?.toString() ?? 'N/A';
+              final length = batch['length']?.toString() ?? '';
+              final bodyType = batch['bodyType']?.toString() ?? '';
+
+              return Card(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                child: ListTile(
+                  title: Text(
+                    batchNumber,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Available: ${qty.toStringAsFixed(2)} kg',
+                        style: TextStyle(
+                          color: qty < 100 ? Colors.orange : Colors.green,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text(
+                          'Purchase Price: ${purchasePrice.toStringAsFixed(2)} PKR/kg'),
+                      Text('Vendor: $vendorName'),
+                      if (length.isNotEmpty || bodyType.isNotEmpty)
+                        Text('Size: $length - $bodyType'),
+                      Text(
+                        'Date: ${DateFormat('dd MMM yyyy').format(purchaseDate)}',
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                    ],
+                  ),
+                  trailing: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green),
+                    onPressed: () {
+                      setState(() {
+                        _quotationRows[index]['batchId'] = batch['id'];
+                        _quotationRows[index]['batchNumber'] = batchNumber;
+                        _quotationRows[index]['availableBatchQty'] = qty;
+                        _quotationRows[index]['batchPurchasePrice'] = purchasePrice;
+                      });
+                      Navigator.pop(context);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Batch $batchNumber selected'),
+                          duration: const Duration(seconds: 1),
+                        ),
+                      );
+                    },
+                    child: const Text('Select',
+                        style: TextStyle(color: Colors.white)),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child:
+            Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+
 
   Future<Uint8List> _renderTextAsImage(
       String text, {
@@ -334,12 +515,12 @@ class _QuotationPageState extends State<QuotationPage> {
                 pw.Column(
                   children: [
                     pw.Text(
-                      'Developed By: Tech Soft',
+                      'Product by: Swittix Technologies',
                       style: pw.TextStyle(
                           fontSize: 12, fontWeight: pw.FontWeight.bold),
                     ),
                     pw.Text(
-                      '0341-6426617',
+                      'www.swittix.com',
                       style: pw.TextStyle(
                           fontSize: 12, fontWeight: pw.FontWeight.bold),
                     ),
@@ -1148,6 +1329,9 @@ class _QuotationPageState extends State<QuotationPage> {
           'descriptionController': descriptionController,
           'weightController': weightController,
           'lengthBodyCombination': item['lengthBodyCombination'],
+          'batchId': item['batchId'],
+          'batchNumber': item['batchNumber'],
+          'availableBatchQty': item['availableBatchQty'],
         });
       }
 
@@ -1267,6 +1451,9 @@ class _QuotationPageState extends State<QuotationPage> {
         'itemName': '',
         'calculationType': 'quantity',
         'weightPerUnit': null,
+        'batchId': null,
+        'batchNumber': null,
+        'availableBatchQty': null,
         'weightUnit': 'kg',
         'totalWeight': 0.0,
         'manualWeightEntry': false,
@@ -1550,6 +1737,10 @@ class _QuotationPageState extends State<QuotationPage> {
             'weightUnit': weightUnit,
             'totalWeight': finalTotalWeight,
             'weightInput': row['weightController']?.text ?? '', // Save manual input
+            'batchId': row['batchId'],
+            'batchNumber': row['batchNumber'],
+            'batchPurchasePrice': row['batchPurchasePrice'],
+            'availableBatchQty': row['availableBatchQty'],
           };
         }).toList(),
       };
@@ -2024,6 +2215,15 @@ class _QuotationPageState extends State<QuotationPage> {
                   ),
                   Expanded(
                     child: Text(
+                      'Batch',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue[800]),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
                       languageProvider.isEnglish ? 'Length' : 'لمبائی',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
@@ -2149,7 +2349,72 @@ class _QuotationPageState extends State<QuotationPage> {
                         allowManualEntry: true,
                       ),
                     ),
-
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: InkWell(
+                          onTap: () {
+                            final itemName =
+                                _quotationRows[index]['itemName'] ?? '';
+                            if (itemName.isEmpty) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content:
+                                    Text('Please select an item first')),
+                              );
+                              return;
+                            }
+                            _showBatchSelectionDialog(index, itemName);
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 10),
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                color:
+                                _quotationRows[index]['batchId'] != null
+                                    ? Colors.green
+                                    : Colors.grey[300]!,
+                              ),
+                              borderRadius: BorderRadius.circular(8),
+                              color:
+                              _quotationRows[index]['batchId'] != null
+                                  ? Colors.green[50]
+                                  : Colors.grey[50],
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _quotationRows[index]['batchNumber'] ??
+                                      'Select Batch',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: _quotationRows[index]['batchId'] !=
+                                        null
+                                        ? Colors.green[800]
+                                        : Colors.grey[600],
+                                    fontWeight:
+                                    _quotationRows[index]['batchId'] != null
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
+                                  ),
+                                ),
+                                if (_quotationRows[index]
+                                ['availableBatchQty'] !=
+                                    null)
+                                  Text(
+                                    'Avail: ${(_quotationRows[index]['availableBatchQty'] as double).toStringAsFixed(2)} kg',
+                                    style: TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.grey[600]),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                     // Length field
                     Expanded(
                       child: Padding(
