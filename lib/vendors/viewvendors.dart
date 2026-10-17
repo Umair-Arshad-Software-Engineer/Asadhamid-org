@@ -1,12 +1,12 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
-import 'package:file_picker/file_picker.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart' show DateFormat;
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import '../Provider/lanprovider.dart';
 import '../bankmanagement/banknames.dart';
@@ -14,13 +14,22 @@ import 'addvendors.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'itemwise ledger.dart';
 import 'ledgerpage.dart';
 import 'dart:convert';
 import 'dart:ui' as ui;
+import 'dart:html' as html;
+import 'dart:js_interop';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 
+@JS('copyPngToClipboard')
+external JSPromise<JSBoolean> _copyPngToClipboardJs(JSString base64Png);
+
+@JS('sharePngWithText')
+external JSPromise<JSBoolean> _sharePngWithTextJs(
+    JSString base64Png, JSString text, JSString fileName);
 class ViewVendorsPage extends StatefulWidget {
   const ViewVendorsPage({super.key});
 
@@ -39,6 +48,318 @@ class _ViewVendorsPageState extends State<ViewVendorsPage> {
   // ── NEW: selection state ──
   bool _isSelectionMode = false;
   Set<String> _selectedVendorIds = {};
+
+  // ── WhatsApp helpers ─────────────────────────────────────────────────────
+
+  String? _normalizePkNumber(String raw) {
+    var n = raw.replaceAll(RegExp(r'[^0-9+]'), '');
+    if (n.startsWith('+')) n = n.substring(1);
+    if (n.startsWith('00')) n = n.substring(2);
+    if (n.startsWith('0')) n = '92${n.substring(1)}';
+    if (n.startsWith('92') && n.length == 12) return n;
+    return null;
+  }
+
+  Future<bool> _isWhatsAppAvailable(String number) async {
+    if (kIsWeb) return true;
+    try {
+      return await canLaunchUrl(Uri.parse('whatsapp://send?phone=$number'));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _copyImageToClipboard(Uint8List png) async {
+    if (!kIsWeb) return false;
+    try {
+      final r = await _copyPngToClipboardJs(base64Encode(png).toJS).toDart;
+      return r.toDart;
+    } catch (e) {
+      print('Clipboard copy failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _shareImageWithText(
+      Uint8List png, String text, String fileName) async {
+    if (kIsWeb) {
+      try {
+        final r = await _sharePngWithTextJs(
+            base64Encode(png).toJS, text.toJS, fileName.toJS)
+            .toDart;
+        return r.toDart;
+      } catch (e) {
+        print('Web share failed: $e');
+        return false;
+      }
+    }
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(png);
+      await Share.shareXFiles([XFile(file.path)], text: text);
+      return true;
+    } catch (e) {
+      print('Share failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _downloadPDFWeb(Uint8List bytes, String fileName) async {
+    try {
+      final blob = html.Blob([bytes], 'application/pdf');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      html.AnchorElement(href: url)
+        ..setAttribute('download', fileName)
+        ..click();
+      html.Url.revokeObjectUrl(url);
+    } catch (e) {
+      print('PDF download failed: $e');
+    }
+  }
+
+  Future<void> _sendWhatsAppTextOnly(String number, String message) async {
+    final link =
+        'whatsapp://send?phone=$number&text=${Uri.encodeComponent(message)}';
+    if (kIsWeb) {
+      final a = html.AnchorElement(href: link)
+        ..target = '_self'
+        ..style.display = 'none';
+      html.document.body?.append(a);
+      a.click();
+      a.remove();
+    } else {
+      await launchUrl(Uri.parse(link), mode: LaunchMode.externalApplication);
+    }
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+// ── Payment receipt PDF ──────────────────────────────────────────────────
+
+  Future<Uint8List> _buildVendorPaymentReceiptPdf({
+    required String vendorName,
+    required double amount,
+    required String method,
+    required DateTime date,
+    required String description,
+    required double remainingBalance,
+    String? bankName,
+    String? chequeNumber,
+  }) async {
+    final pdf = pw.Document();
+    final orange = PdfColor.fromHex('#E65100');
+
+    pw.Widget row(String label, String value, {bool bold = false}) =>
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(vertical: 4),
+          child: pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Text(label,
+                  style: pw.TextStyle(
+                      fontSize: 12, fontWeight: pw.FontWeight.bold)),
+              pw.Text(value,
+                  style: pw.TextStyle(
+                      fontSize: 12,
+                      fontWeight:
+                      bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+            ],
+          ),
+        );
+
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a5,
+        margin: const pw.EdgeInsets.all(24),
+        build: (_) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Center(
+              child: pw.Text('PAYMENT RECEIPT',
+                  style: pw.TextStyle(
+                      fontSize: 20,
+                      fontWeight: pw.FontWeight.bold,
+                      color: orange)),
+            ),
+            pw.SizedBox(height: 4),
+            pw.Center(
+              child: pw.Text('Mughal Group of Industries',
+                  style: const pw.TextStyle(
+                      fontSize: 11, color: PdfColors.grey700)),
+            ),
+            pw.Divider(color: orange, thickness: 1.5),
+            pw.SizedBox(height: 8),
+            row('Vendor', vendorName),
+            row('Date', DateFormat('dd/MM/yyyy HH:mm').format(date)),
+            row('Method', method),
+            if (bankName != null && bankName.isNotEmpty) row('Bank', bankName),
+            if (chequeNumber != null && chequeNumber.isNotEmpty)
+              row('Cheque #', chequeNumber),
+            if (description.isNotEmpty) row('Description', description),
+            pw.Divider(),
+            row('Amount Paid', 'Rs ${amount.toStringAsFixed(2)}', bold: true),
+            row('Remaining Balance',
+                'Rs ${remainingBalance.toStringAsFixed(2)}',
+                bold: true),
+            pw.Spacer(),
+            pw.Center(
+              child: pw.Text('Thank you!',
+                  style: pw.TextStyle(
+                      fontSize: 12, fontWeight: pw.FontWeight.bold)),
+            ),
+          ],
+        ),
+      ),
+    );
+    return pdf.save();
+  }
+
+// ── Main offer dialog ────────────────────────────────────────────────────
+
+  Future<void> _offerVendorPaymentWhatsApp({
+    required String vendorId,
+    required String vendorName,
+    required String vendorPhone,
+    required double amount,
+    required String method,
+    required DateTime date,
+    required String description,
+    String? bankName,
+    String? chequeNumber,
+  }) async {
+    if (!mounted) return;
+    final isEn =
+        Provider.of<LanguageProvider>(context, listen: false).isEnglish;
+
+    final number = _normalizePkNumber(vendorPhone);
+    if (number == null) return;
+    if (!await _isWhatsAppAvailable(number)) return;
+
+    final remaining = await _getVendorRemainingBalance(vendorId);
+    if (!mounted) return;
+
+    final message = 'Assalam o Alaikum $vendorName,\n'
+        'A payment of Rs ${amount.toStringAsFixed(2)} has been made to you.\n'
+        'Method: $method'
+        '${bankName != null && bankName.isNotEmpty ? ' ($bankName)' : ''}\n'
+        '${chequeNumber != null && chequeNumber.isNotEmpty ? 'Cheque #: $chequeNumber\n' : ''}'
+        'Date: ${DateFormat('dd/MM/yyyy').format(date)}\n'
+        'Remaining balance: Rs ${remaining.toStringAsFixed(2)}\n'
+        'Thank you!';
+
+    // Build receipt BEFORE the dialog so clipboard/share run inside a tap
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    Uint8List? pdfBytes;
+    Uint8List? pngBytes;
+    try {
+      pdfBytes = await _buildVendorPaymentReceiptPdf(
+        vendorName: vendorName,
+        amount: amount,
+        method: method,
+        date: date,
+        description: description,
+        remainingBalance: remaining,
+        bankName: bankName,
+        chequeNumber: chequeNumber,
+      );
+      await for (final page
+      in Printing.raster(pdfBytes, pages: [0], dpi: 144)) {
+        pngBytes = await page.toPng();
+        break;
+      }
+    } catch (e) {
+      print('Receipt build failed: $e');
+    }
+
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    final fileBase =
+        'Payment_${vendorName.replaceAll(RegExp(r'[^A-Za-z0-9]'), '_')}_${DateFormat('yyyyMMdd_HHmm').format(date)}';
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isEn ? 'Send on WhatsApp' : 'واٹس ایپ پر بھیجیں'),
+        content: Text(isEn
+            ? 'Send payment receipt to $vendorName ($vendorPhone)?\n\n'
+            'Image + Message: the receipt is copied and WhatsApp opens the '
+            'chat. Press Ctrl+V to attach it.\n\n'
+            'Share Image: pick WhatsApp from the share sheet.'
+            : '$vendorName ($vendorPhone) کو ادائیگی کی رسید بھیجیں؟\n\n'
+            'تصویر + پیغام: رسید کاپی ہوگی اور چیٹ کھلے گی، پھر Ctrl+V دبائیں۔\n\n'
+            'شیئر: شیئر مینو سے واٹس ایپ منتخب کریں۔'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(isEn ? 'Not now' : 'ابھی نہیں'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.message, size: 18),
+            label: Text(isEn ? 'Text Only' : 'صرف پیغام'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _sendWhatsAppTextOnly(number, message);
+            },
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.picture_as_pdf, size: 18),
+            label: Text(isEn ? 'Download PDF' : 'پی ڈی ایف ڈاؤن لوڈ'),
+            onPressed: pdfBytes == null
+                ? null
+                : () => _downloadPDFWeb(pdfBytes!, '$fileBase.pdf'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.share, size: 18),
+            label: Text(isEn ? 'Share Image' : 'تصویر شیئر کریں'),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              final ok = await _shareImageWithText(
+                  pngBytes!, message, '$fileBase.png');
+              if (!ok) {
+                _snack(isEn
+                    ? 'Sharing not supported here. Use Image + Message.'
+                    : 'یہاں شیئرنگ دستیاب نہیں۔ تصویر + پیغام استعمال کریں۔');
+              }
+            },
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.image, size: 18),
+            label: Text(isEn ? 'Image + Message' : 'تصویر + پیغام'),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green, foregroundColor: Colors.white),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              final copied = await _copyImageToClipboard(pngBytes!);
+              await _sendWhatsAppTextOnly(number, message);
+              _snack(copied
+                  ? (isEn
+                  ? 'Receipt copied. Press Ctrl+V in the chat.'
+                  : 'رسید کاپی ہو گئی۔ چیٹ میں Ctrl+V دبائیں۔')
+                  : (isEn
+                  ? 'Could not copy the image. Use Share Image or Download PDF.'
+                  : 'تصویر کاپی نہیں ہو سکی۔ شیئر یا پی ڈی ایف استعمال کریں۔'));
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+
 
   @override
   void initState() {
@@ -153,6 +474,7 @@ class _ViewVendorsPageState extends State<ViewVendorsPage> {
         vendors.add({
           "id": entry.key.toString(),
           "name": entry.value["name"] ?? "Unknown Vendor",
+          "phone": entry.value["phone"] ?? "",
           "paidAmount": actualPaidAmount,
           "totalPurchases": totalPurchases,
           "openingBalance": openingBalance,
@@ -876,7 +1198,7 @@ class _ViewVendorsPageState extends State<ViewVendorsPage> {
     return selectedBank;
   }
 
-  void _payVendor(String vendorId, String vendorName) async {
+  void _payVendor(String vendorId, String vendorName, String vendorPhone) async {
     final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
     final DatabaseReference vendorRef = FirebaseDatabase.instance.ref('vendors/$vendorId');
 
@@ -1206,12 +1528,24 @@ class _ViewVendorsPageState extends State<ViewVendorsPage> {
                       // Update vendor's paid amount
                       await vendorRef.child('paidAmount')
                           .set(ServerValue.increment(paymentAmount));
-
+                      final savedMethod = selectedPaymentMethod!;
                       Navigator.pop(context);
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(content: Text(languageProvider.isEnglish
                             ? 'Payment recorded successfully!'
                             : 'ادائیگی کامیابی سے ریکارڈ ہو گئی!')),
+                      );
+                      // Uses the State's context, so it still works after the dialog is closed
+                      await _offerVendorPaymentWhatsApp(
+                        vendorId: vendorId,
+                        vendorName: vendorName,
+                        vendorPhone: vendorPhone,
+                        amount: paymentAmount,
+                        method: savedMethod,
+                        date: paymentDate,
+                        description: description ?? '',
+                        bankName: bankName,
+                        chequeNumber: chequeNumber,
                       );
                     } catch (e) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -1766,8 +2100,7 @@ class _ViewVendorsPageState extends State<ViewVendorsPage> {
                               ),
                               IconButton(
                                 icon: Icon(Icons.payment, color: Color(0xFFFF8A65)),
-                                onPressed: () => _payVendor(vendor["id"], vendor["name"]),
-                              ),
+                                onPressed: () => _payVendor(vendor["id"], vendor["name"], vendor["phone"] ?? ''),                              ),
                               IconButton(
                                 icon: Icon(Icons.history, color: Color(0xFFFF8A65)),
                                 onPressed: () => _showPaymentHistory(vendor["id"]),

@@ -26,13 +26,54 @@
   <meta name="apple-mobile-web-app-title" content="mughal_group_branch_two">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
+
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.2.146/build/pdf.min.js"></script>
+  <script>pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.2.146/build/pdf.worker.min.js";</script>
+
+  <script>
+    // Base64 -> Blob helper
+    function b64ToBlob(b64, type) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: type });
+    }
+
+    // Copies a PNG to the clipboard.
+    // Needs https or localhost, and must be called inside a user tap.
+    window.copyPngToClipboard = async function (b64) {
+      try {
+        const blob = b64ToBlob(b64, 'image/png');
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        return true;
+      } catch (e) {
+        console.error('copyPngToClipboard failed', e);
+        return false;
+      }
+    };
+
+    // Opens the native share sheet with the image AND the text together.
+    // Returns false if the browser/OS doesn't support file sharing.
+    window.sharePngWithText = async function (b64, text, fileName) {
+      try {
+        const file = new File([b64ToBlob(b64, 'image/png')], fileName, { type: 'image/png' });
+        if (!navigator.canShare || !navigator.canShare({ files: [file] })) return false;
+        await navigator.share({ files: [file], text: text });
+        return true;
+      } catch (e) {
+        console.error('sharePngWithText failed', e);
+        return false;
+      }
+    };
+  </script>
+
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="logo.png"/>
 
-  <title>mughal_group_branch_two</title>
+  <title>Asad Hamid</title>
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
-  <script src="flutter_bootstrap.js" async></script>
+<script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

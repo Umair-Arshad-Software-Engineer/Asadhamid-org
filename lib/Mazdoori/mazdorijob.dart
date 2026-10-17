@@ -1,13 +1,22 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-
+import 'dart:html' as html;
+import 'dart:js_interop';
+import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../Filled/Filledpage.dart';
 import '../Models/itemModel.dart';
@@ -16,6 +25,13 @@ import '../Provider/Mazdoorprovider ·.dart';
 import '../Provider/filled provider.dart';
 import '../Provider/lanprovider.dart';
 import '../bankmanagement/banknames.dart';
+
+@JS('copyPngToClipboard')
+external JSPromise<JSBoolean> _copyPngToClipboardJs(JSString base64Png);
+
+@JS('sharePngWithText')
+external JSPromise<JSBoolean> _sharePngWithTextJs(
+    JSString base64Png, JSString text, JSString fileName);
 
 enum MazdoorJobMode { giveWire, receiveReturn }
 
@@ -34,12 +50,14 @@ class _WireRow {
 class MazdoorJobPage extends StatefulWidget {
   final String mazdoorId;
   final String mazdoorName;
+  final String mazdoorPhone; // NEW – used for WhatsApp
   final MazdoorJobMode mode;
 
   const MazdoorJobPage({
     Key? key,
     required this.mazdoorId,
     required this.mazdoorName,
+    this.mazdoorPhone = '',
     required this.mode,
   }) : super(key: key);
 
@@ -76,7 +94,7 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
   String? _wireBatchId;
   String? _wireBatchNumber;
 
-  // ── NEW: Cash payment method state (mirrors CustomerList) ──
+  // ── Cash payment method state ──
   String? _selectedPaymentMethod; // 'Cash' | 'Online' | 'Cheque' | 'Bank' | 'Slip'
   DateTime _selectedPaymentDate = DateTime.now();
   String? _selectedBankId;
@@ -146,6 +164,391 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
     final weightPerUnit = double.tryParse(row.weightController.text) ?? 0.0;
     if (weightPerUnit > 0 && qty > 0) return weightPerUnit * qty;
     return qty;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // WHATSAPP HELPERS
+  // ═══════════════════════════════════════════════════════════════════
+
+  /// 0300-1234567 / +92 300 1234567 -> 923001234567
+  String? _normalizePkNumber(String raw) {
+    var n = raw.replaceAll(RegExp(r'[^0-9+]'), '');
+    if (n.startsWith('+')) n = n.substring(1);
+    if (n.startsWith('00')) n = n.substring(2);
+    if (n.startsWith('0')) n = '92${n.substring(1)}';
+    if (n.startsWith('92') && n.length == 12) return n;
+    return null;
+  }
+
+  Future<bool> _isWhatsAppAvailable(String number) async {
+    if (kIsWeb) return true;
+    try {
+      return await canLaunchUrl(Uri.parse('whatsapp://send?phone=$number'));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _copyImageToClipboard(Uint8List png) async {
+    if (!kIsWeb) return false;
+    try {
+      final r = await _copyPngToClipboardJs(base64Encode(png).toJS).toDart;
+      return r.toDart;
+    } catch (e) {
+      print('Clipboard copy failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _shareImageWithText(
+      Uint8List png, String text, String fileName) async {
+    if (kIsWeb) {
+      try {
+        final r = await _sharePngWithTextJs(
+            base64Encode(png).toJS, text.toJS, fileName.toJS)
+            .toDart;
+        return r.toDart;
+      } catch (e) {
+        print('Web share failed: $e');
+        return false;
+      }
+    }
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(png);
+      await Share.shareXFiles([XFile(file.path)], text: text);
+      return true;
+    } catch (e) {
+      print('Share failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _downloadPDFWeb(Uint8List bytes, String fileName) async {
+    try {
+      final blob = html.Blob([bytes], 'application/pdf');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      html.AnchorElement(href: url)
+        ..setAttribute('download', fileName)
+        ..click();
+      html.Url.revokeObjectUrl(url);
+    } catch (e) {
+      print('PDF download failed: $e');
+    }
+  }
+
+  Future<void> _sendWhatsAppTextOnly(String number, String message) async {
+    final link =
+        'whatsapp://send?phone=$number&text=${Uri.encodeComponent(message)}';
+    if (kIsWeb) {
+      final a = html.AnchorElement(href: link)
+        ..target = '_self'
+        ..style.display = 'none';
+      html.document.body?.append(a);
+      a.click();
+      a.remove();
+    } else {
+      await launchUrl(Uri.parse(link), mode: LaunchMode.externalApplication);
+    }
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  // ── Receipt PDF ──────────────────────────────────────────────────────
+
+  Future<Uint8List> _renderTextAsImage(
+      String text, {
+        double fontSize = 10,
+        double width = 100,
+        double height = 20,
+      }) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final bgPaint = Paint()..color = const Color(0xFFFFFFFF);
+    canvas.drawRect(Rect.fromLTWH(0, 0, width, height), bgPaint);
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(color: const Color(0xFF000000), fontSize: fontSize),
+      ),
+      textDirection: ui.TextDirection.ltr,
+      maxLines: 1,
+    );
+    textPainter.layout(maxWidth: width - 4);
+    textPainter.paint(canvas, Offset(2, (height - textPainter.height) / 2));
+    final picture = recorder.endRecording();
+    final img = await picture.toImage(width.toInt(), height.toInt());
+    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    return byteData!.buffer.asUint8List();
+  }
+
+  Future<Uint8List> _buildMazdoorReceiptPdf({
+    required String title,
+    required List<List<String>> lines,
+    required double balance,
+  }) async {
+    final pdf = pw.Document();
+    final teal = PdfColor.fromHex('#00796B');
+
+    // Rows whose value is text (item names, description, bank...) -> image
+    const imageLabels = {'Item', 'Description', 'Bank', 'Batch', 'Cheque #'};
+
+    // ── Pre-render BEFORE pw.Page, one image per unique string ──
+    final Map<String, Uint8List> textImages = {};
+    Future<void> prep(String s, {double width = 230}) async {
+      final t = s.trim();
+      if (t.isEmpty || textImages.containsKey(t)) return;
+      textImages[t] = await _renderTextAsImage(t,
+          fontSize: 11, width: width, height: 20);
+    }
+
+    await prep(widget.mazdoorName);
+    for (final l in lines) {
+      if (imageLabels.contains(l[0])) await prep(l[1]);
+    }
+
+    // ── Same imgCell pattern as purchase page ──
+    pw.Widget imgCell(Uint8List? bytes, String fallback, {bool bold = false}) {
+      if (bytes != null) {
+        return pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 2),
+          child: pw.SizedBox(
+            height: 20,
+            child: pw.Image(pw.MemoryImage(bytes), fit: pw.BoxFit.contain),
+          ),
+        );
+      }
+      return pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        child: pw.Text(
+          fallback,
+          style: pw.TextStyle(
+              fontSize: 10,
+              fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal),
+        ),
+      );
+    }
+
+    pw.TableRow tRow(String label, String value,
+        {bool bold = false, bool asImage = false}) {
+      return pw.TableRow(children: [
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          child: pw.Text(label,
+              style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+        ),
+        asImage
+            ? imgCell(textImages[value.trim()], value, bold: bold)
+            : imgCell(null, value, bold: bold),
+      ]);
+    }
+
+    final balanceText = balance > 0
+        ? 'Owes you Rs ${balance.toStringAsFixed(2)}'
+        : balance < 0
+        ? 'You owe Rs ${(-balance).toStringAsFixed(2)}'
+        : 'Settled';
+
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a5,
+        margin: const pw.EdgeInsets.all(24),
+        build: (_) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Center(
+              child: pw.Text(title.toUpperCase(),
+                  style: pw.TextStyle(
+                      fontSize: 20,
+                      fontWeight: pw.FontWeight.bold,
+                      color: teal)),
+            ),
+            pw.SizedBox(height: 4),
+            pw.Center(
+              child: pw.Text('Mughal Group of Industries',
+                  style: const pw.TextStyle(
+                      fontSize: 11, color: PdfColors.grey700)),
+            ),
+            pw.Divider(color: teal, thickness: 1.5),
+            pw.SizedBox(height: 8),
+            pw.Table(
+              border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+              columnWidths: const {
+                0: pw.FlexColumnWidth(1.2),
+                1: pw.FlexColumnWidth(2.8),
+              },
+              children: [
+                tRow('Mazdoor', widget.mazdoorName, asImage: true),
+                tRow('Date',
+                    DateFormat('dd/MM/yyyy HH:mm').format(DateTime.now())),
+                ...lines.map((l) =>
+                    tRow(l[0], l[1], asImage: imageLabels.contains(l[0]))),
+                pw.TableRow(
+                  decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+                  children: [
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.all(4),
+                      child: pw.Text('Balance',
+                          style: pw.TextStyle(
+                              fontSize: 10, fontWeight: pw.FontWeight.bold)),
+                    ),
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.all(4),
+                      child: pw.Text(balanceText,
+                          style: pw.TextStyle(
+                              fontSize: 10, fontWeight: pw.FontWeight.bold)),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            pw.Spacer(),
+            pw.Center(
+              child: pw.Text('Thank you!',
+                  style: pw.TextStyle(
+                      fontSize: 12, fontWeight: pw.FontWeight.bold)),
+            ),
+          ],
+        ),
+      ),
+    );
+    return pdf.save();
+  }
+
+  // ── Offer dialog ─────────────────────────────────────────────────────
+
+  Future<void> _offerMazdoorWhatsApp({
+    required String title,
+    required List<List<String>> lines,
+    required String summary,
+  }) async {
+    if (!mounted) return;
+    final isEn =
+        Provider.of<LanguageProvider>(context, listen: false).isEnglish;
+
+    final number = _normalizePkNumber(widget.mazdoorPhone);
+    if (number == null) return;
+    if (!await _isWhatsAppAvailable(number)) return;
+
+    final balance = await Provider.of<MazdoorProvider>(context, listen: false)
+        .getMazdoorBalance(widget.mazdoorId);
+    if (!mounted) return;
+
+    final balanceText = balance > 0
+        ? 'Balance: Rs ${balance.toStringAsFixed(2)} (owed to us)'
+        : balance < 0
+        ? 'Balance: Rs ${(-balance).toStringAsFixed(2)} (we owe you)'
+        : 'Balance: Settled';
+
+    final message = 'Assalam o Alaikum ${widget.mazdoorName},\n'
+        '$summary\n'
+        'Date: ${DateFormat('dd/MM/yyyy').format(DateTime.now())}\n'
+        '$balanceText\n'
+        'Thank you!';
+
+    // Build receipt BEFORE the dialog so clipboard/share run inside a tap
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    Uint8List? pdfBytes;
+    Uint8List? pngBytes;
+    try {
+      pdfBytes = await _buildMazdoorReceiptPdf(
+          title: title, lines: lines, balance: balance);
+      await for (final page
+      in Printing.raster(pdfBytes, pages: [0], dpi: 144)) {
+        pngBytes = await page.toPng();
+        break;
+      }
+    } catch (e) {
+      print('Receipt build failed: $e');
+    }
+
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    final fileBase =
+        'Mazdoor_${widget.mazdoorName.replaceAll(RegExp(r'[^A-Za-z0-9]'), '_')}_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}';
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isEn ? 'Send on WhatsApp' : 'واٹس ایپ پر بھیجیں'),
+        content: Text(isEn
+            ? 'Send receipt to ${widget.mazdoorName} (${widget.mazdoorPhone})?\n\n'
+            'Image + Message: the receipt is copied and WhatsApp opens the '
+            'chat. Press Ctrl+V to attach it.\n\n'
+            'Share Image: pick WhatsApp from the share sheet.'
+            : '${widget.mazdoorName} (${widget.mazdoorPhone}) کو رسید بھیجیں؟\n\n'
+            'تصویر + پیغام: رسید کاپی ہوگی اور چیٹ کھلے گی، پھر Ctrl+V دبائیں۔\n\n'
+            'شیئر: شیئر مینو سے واٹس ایپ منتخب کریں۔'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(isEn ? 'Not now' : 'ابھی نہیں'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.message, size: 18),
+            label: Text(isEn ? 'Text Only' : 'صرف پیغام'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _sendWhatsAppTextOnly(number, message);
+            },
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.picture_as_pdf, size: 18),
+            label: Text(isEn ? 'Download PDF' : 'پی ڈی ایف ڈاؤن لوڈ'),
+            onPressed: pdfBytes == null
+                ? null
+                : () => _downloadPDFWeb(pdfBytes!, '$fileBase.pdf'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.share, size: 18),
+            label: Text(isEn ? 'Share Image' : 'تصویر شیئر کریں'),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              final ok = await _shareImageWithText(
+                  pngBytes!, message, '$fileBase.png');
+              if (!ok) {
+                _snack(isEn
+                    ? 'Sharing not supported here. Use Image + Message.'
+                    : 'یہاں شیئرنگ دستیاب نہیں۔ تصویر + پیغام استعمال کریں۔');
+              }
+            },
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.image, size: 18),
+            label: Text(isEn ? 'Image + Message' : 'تصویر + پیغام'),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              final copied = await _copyImageToClipboard(pngBytes!);
+              await _sendWhatsAppTextOnly(number, message);
+              _snack(copied
+                  ? (isEn
+                  ? 'Receipt copied. Press Ctrl+V in the chat.'
+                  : 'رسید کاپی ہو گئی۔ چیٹ میں Ctrl+V دبائیں۔')
+                  : (isEn
+                  ? 'Could not copy the image. Use Share Image or Download PDF.'
+                  : 'تصویر کاپی نہیں ہو سکی۔ شیئر یا پی ڈی ایف استعمال کریں۔'));
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -276,7 +679,7 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // SUBMIT: RECEIVE (bolt/wire/cash) — Cash now goes through payment methods
+  // SUBMIT: RECEIVE / GIVE (bolt / wire / cash)
   // ═══════════════════════════════════════════════════════════════════
   Future<void> _submitReceive() async {
     final languageProvider =
@@ -286,8 +689,13 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
     try {
       final provider = Provider.of<MazdoorProvider>(context, listen: false);
 
+      // WhatsApp receipt data, filled by whichever branch succeeds
+      String? receiptTitle;
+      final List<List<String>> receiptLines = [];
+      String waSummary = '';
+
       if (_returnType == 'bolt') {
-        // ── Bolts (unchanged) ──
+        // ── Bolts ──
         final qty = double.tryParse(_boltQtyController.text);
         final rate = double.tryParse(_boltRateController.text);
         if (_boltItemController.text.isEmpty ||
@@ -330,6 +738,17 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
           );
         }
 
+        receiptTitle = _isGiveWire ? 'Bolts Given' : 'Bolts Received';
+        receiptLines.addAll([
+          ['Item', _boltItemController.text],
+          ['Quantity', qty.toStringAsFixed(2)],
+          ['Rate', 'Rs ${rate.toStringAsFixed(2)}'],
+          ['Value', 'Rs ${(qty * rate).toStringAsFixed(2)}'],
+        ]);
+        waSummary =
+        '${_isGiveWire ? 'Bolts given' : 'Bolts received'}: ${_boltItemController.text}\n'
+            'Qty: ${qty.toStringAsFixed(2)} × Rs ${rate.toStringAsFixed(2)} = Rs ${(qty * rate).toStringAsFixed(2)}';
+
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(languageProvider.isEnglish
               ? 'Bolts ${_isGiveWire ? 'given' : 'recorded'} — ${widget.mazdoorName}\'s balance updated.'
@@ -337,7 +756,7 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
           backgroundColor: Colors.green,
         ));
       } else if (_returnType == 'wire') {
-        // ── Wire return (unchanged) ──
+        // ── Wire ──
         final qty = double.tryParse(_wireQtyController.text);
         final rate = double.tryParse(_wireRateController.text);
         final weightPerUnit = double.tryParse(_wireWeightController.text);
@@ -393,6 +812,21 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
           );
         }
 
+        receiptTitle = _isGiveWire ? 'Wire Given' : 'Wire Received';
+        receiptLines.addAll([
+          ['Item', _wireItemController.text],
+          ['Quantity', qty.toStringAsFixed(2)],
+          if (weightPerUnit != null && weightPerUnit > 0)
+            ['Weight/Unit', '${weightPerUnit.toStringAsFixed(2)} kg'],
+          ['Total Weight', '${totalWeight.toStringAsFixed(2)} kg'],
+          ['Rate', 'Rs ${rate.toStringAsFixed(2)}/kg'],
+          ['Value', 'Rs ${(totalWeight * rate).toStringAsFixed(2)}'],
+          if (_wireBatchNumber != null) ['Batch', _wireBatchNumber!],
+        ]);
+        waSummary =
+        '${_isGiveWire ? 'Wire given' : 'Wire received'}: ${_wireItemController.text}\n'
+            'Weight: ${totalWeight.toStringAsFixed(2)} kg × Rs ${rate.toStringAsFixed(2)} = Rs ${(totalWeight * rate).toStringAsFixed(2)}';
+
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(languageProvider.isEnglish
               ? 'Wire ${_isGiveWire ? 'given' : 'return recorded'} — ${widget.mazdoorName}\'s balance updated.'
@@ -400,7 +834,7 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
           backgroundColor: Colors.green,
         ));
       } else {
-        // ── CASH ── now with full payment-method flow
+        // ── CASH ── full payment-method flow
         final amount = double.tryParse(_cashAmountController.text);
         if (amount == null || amount <= 0) {
           _showValidationSnack(languageProvider, 'Please enter a valid amount',
@@ -451,7 +885,7 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
           return;
         }
 
-        // 1. Ledger credit on the Mazdoor (reduces their balance)
+        // 1. Ledger entry on the Mazdoor
         final cashDesc = _returnDescController.text.isEmpty
             ? '${_selectedPaymentMethod ?? "Cash"} payment'
             : _returnDescController.text;
@@ -480,7 +914,6 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
         // 2. Side effects per method
         final filledProvider =
         Provider.of<FilledProvider>(context, listen: false);
-        final filledNumber = DateTime.now().millisecondsSinceEpoch.toString();
 
         if (_selectedPaymentMethod == 'Cash') {
           await filledProvider.addCashBookEntry(
@@ -529,8 +962,31 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
               (await bankBalanceRef.get()).value as num? ?? 0.0;
           await bankBalanceRef.set(currentBalance + (bankSign * amount));
         }
-        // 'Online' and 'Slip' → no additional side effects, matching
-        // the customer-side behaviour.
+        // 'Online' and 'Slip' → no additional side effects.
+
+        final bool showBank = _selectedBankName != null &&
+            (_selectedPaymentMethod == 'Bank' ||
+                _selectedPaymentMethod == 'Cheque');
+
+        receiptTitle = _isGiveWire ? 'Payment Given' : 'Payment Received';
+        receiptLines.addAll([
+          ['Method', _selectedPaymentMethod ?? 'Cash'],
+          ['Amount', 'Rs ${amount.toStringAsFixed(2)}'],
+          [
+            'Date',
+            DateFormat('dd/MM/yyyy HH:mm').format(_selectedPaymentDate)
+          ],
+          if (showBank) ['Bank', _selectedBankName!],
+          if (_selectedPaymentMethod == 'Cheque' &&
+              _chequeNumberController.text.isNotEmpty)
+            ['Cheque #', _chequeNumberController.text],
+          if (_returnDescController.text.isNotEmpty)
+            ['Description', _returnDescController.text],
+        ]);
+        waSummary =
+        '${_isGiveWire ? 'Payment given' : 'Payment received'}: Rs ${amount.toStringAsFixed(2)} '
+            '(${_selectedPaymentMethod ?? 'Cash'}${showBank ? ' - $_selectedBankName' : ''})'
+            '${_selectedPaymentMethod == 'Cheque' ? '\nCheque #: ${_chequeNumberController.text}' : ''}';
 
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(languageProvider.isEnglish
@@ -540,7 +996,16 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
         ));
       }
 
-      Navigator.pop(context);
+      // Offer WhatsApp BEFORE closing the page (form data + context still alive)
+      if (receiptTitle != null && mounted) {
+        await _offerMazdoorWhatsApp(
+          title: receiptTitle,
+          lines: receiptLines,
+          summary: waSummary,
+        );
+      }
+
+      if (mounted) Navigator.pop(context);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error: $e')),
@@ -1004,7 +1469,7 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
           ]
 
           // ══════════════════════════════════════════════════════
-          // CASH TAB — now with full payment-method selection
+          // CASH TAB — full payment-method selection
           // ══════════════════════════════════════════════════════
           else ...[
               // Amount
@@ -1012,7 +1477,9 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
                 controller: _cashAmountController,
                 keyboardType: TextInputType.number,
                 decoration: InputDecoration(
-                  labelText: _isGiveWire ? (lp.isEnglish ? 'Cash Given (PKR)' : 'دی گئی رقم') : (lp.isEnglish ? 'Cash Amount (PKR)' : 'نقد رقم'),
+                  labelText: _isGiveWire
+                      ? (lp.isEnglish ? 'Cash Given (PKR)' : 'دی گئی رقم')
+                      : (lp.isEnglish ? 'Cash Amount (PKR)' : 'نقد رقم'),
                   border: const OutlineInputBorder(),
                   prefixText: 'PKR ',
                 ),
@@ -1120,7 +1587,7 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
                 ),
               ],
 
-              // Optional receipt image (parity with customer-side)
+              // Optional receipt image
               const SizedBox(height: 16),
               ElevatedButton(
                 onPressed: () async {
@@ -1162,7 +1629,9 @@ class _MazdoorJobPageState extends State<MazdoorJobPage> {
               child: _isSaving
                   ? const CircularProgressIndicator(color: Colors.white)
                   : Text(
-                _isGiveWire ? (lp.isEnglish ? 'Give' : 'دیں') : (lp.isEnglish ? 'Record' : 'ریکارڈ کریں'),
+                _isGiveWire
+                    ? (lp.isEnglish ? 'Give' : 'دیں')
+                    : (lp.isEnglish ? 'Record' : 'ریکارڈ کریں'),
                 style: const TextStyle(
                     color: Colors.white, fontSize: 16),
               ),

@@ -418,7 +418,8 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
             builder: (_) => MazdoorJobPage(
               mazdoorId: m.id,
               mazdoorName: m.name,
-              mode: MazdoorJobMode.giveWire,
+              mazdoorPhone: m.phone,          // ← add
+              mode: MazdoorJobMode.giveWire,  // or receiveReturn
             ),
           ),
         );

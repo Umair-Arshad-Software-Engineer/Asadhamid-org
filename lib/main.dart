@@ -3,7 +3,8 @@
 import 'package:mughal_group_branch_two/Auth/login.dart';
 import 'package:mughal_group_branch_two/Auth/register.dart';
   import 'package:provider/provider.dart';
-  import 'Provider/Mazdoorprovider ·.dart';
+  import 'Auth/login.dart';
+import 'Provider/Mazdoorprovider ·.dart';
 import 'Provider/bankprovider.dart';
   import 'Provider/customerprovider.dart';
   import 'Provider/employeeprovider.dart';

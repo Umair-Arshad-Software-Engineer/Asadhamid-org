@@ -61,6 +61,8 @@ dependencies:
   screenshot: any
   file_saver: any
   image_gallery_saver: any
+  url_launcher: any
+  flutter_cors_image: any
 
 dev_dependencies:
   flutter_test:

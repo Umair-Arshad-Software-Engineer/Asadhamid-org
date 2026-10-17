@@ -1,14 +1,31 @@
 
+import 'dart:convert';
+import 'dart:io';
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:universal_html/html.dart' as html;
 import '../Provider/lanprovider.dart';
 import 'dart:typed_data';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'dart:js_interop';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+
+@JS('copyPngToClipboard')
+external JSPromise<JSBoolean> _copyPngToClipboardJs(JSString base64Png);
+
+@JS('sharePngWithText')
+external JSPromise<JSBoolean> _sharePngWithTextJs(
+    JSString base64Png, JSString text, JSString fileName);
+
 
 class ItemPurchasePage extends StatefulWidget {
   final String? initialVendorId;
@@ -47,6 +64,238 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
   List<PurchaseItem> _purchaseItems = [];
   List<Map<String, dynamic>> _bomComponents = [];
   Map<String, double> _wastageRecords = {};
+
+
+
+
+  String? _normalizePkNumber(String raw) {
+    var n = raw.replaceAll(RegExp(r'[^0-9+]'), '');
+    if (n.startsWith('+')) n = n.substring(1);
+    if (n.startsWith('00')) n = n.substring(2);
+    if (n.startsWith('0')) n = '92${n.substring(1)}';
+    if (n.startsWith('92') && n.length == 12) return n;
+    return null;
+  }
+
+  Future<bool> _isWhatsAppAvailable(String number) async {
+    if (kIsWeb) return true;
+    try {
+      return await canLaunchUrl(Uri.parse('whatsapp://send?phone=$number'));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _copyImageToClipboard(Uint8List png) async {
+    if (!kIsWeb) return false;
+    try {
+      final r = await _copyPngToClipboardJs(base64Encode(png).toJS).toDart;
+      return r.toDart;
+    } catch (e) {
+      print('Clipboard copy failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _shareImageWithText(
+      Uint8List png, String text, String fileName) async {
+    if (kIsWeb) {
+      try {
+        final r = await _sharePngWithTextJs(
+            base64Encode(png).toJS, text.toJS, fileName.toJS)
+            .toDart;
+        return r.toDart;
+      } catch (e) {
+        print('Web share failed: $e');
+        return false;
+      }
+    }
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(png);
+      await Share.shareXFiles([XFile(file.path)], text: text);
+      return true;
+    } catch (e) {
+      print('Share failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _downloadPDFWeb(Uint8List bytes, String fileName) async {
+    try {
+      final blob = html.Blob([bytes], 'application/pdf');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      html.AnchorElement(href: url)
+        ..setAttribute('download', fileName)
+        ..click();
+      html.Url.revokeObjectUrl(url);
+    } catch (e) {
+      print('PDF download failed: $e');
+    }
+  }
+
+  Future<void> _sendWhatsAppTextOnly(String number, String message) async {
+    final link =
+        'whatsapp://send?phone=$number&text=${Uri.encodeComponent(message)}';
+    if (kIsWeb) {
+      final a = html.AnchorElement(href: link)
+        ..target = '_self'
+        ..style.display = 'none';
+      html.document.body?.append(a);
+      a.click();
+      a.remove();
+    } else {
+      await launchUrl(Uri.parse(link), mode: LaunchMode.externalApplication);
+    }
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _offerWhatsAppMessage(
+      String purchaseId, List<PurchaseItem> validItems) async {
+    final isEn =
+        Provider.of<LanguageProvider>(context, listen: false).isEnglish;
+
+    // Resolve vendor phone (initialVendorId case has no phone in _selectedVendor)
+    String phone = _selectedVendor?['phone']?.toString() ?? '';
+    if (phone.isEmpty) {
+      final v = _vendors.firstWhere(
+              (v) => v['key'] == _selectedVendor?['key'],
+          orElse: () => {});
+      phone = v['phone']?.toString() ?? '';
+    }
+    final number = _normalizePkNumber(phone);
+    if (number == null) return;
+    if (!await _isWhatsAppAvailable(number)) return;
+
+    final vendorName = _selectedVendor?['name'] ?? '';
+    final grandTotal = calculateTotal();
+    final totalWeight = validItems.fold<double>(
+        0,
+            (s, it) =>
+        s +
+            (double.tryParse(it.quantityController.text) ?? 0) *
+                (double.tryParse(it.weightController.text) ?? 0));
+    final refNo = _refNoController.text;
+
+    final message = 'Assalam o Alaikum $vendorName,\n'
+        'Purchase ${widget.isEditMode ? 'updated' : 'recorded'}.\n'
+        '${refNo.isNotEmpty ? 'Reference: $refNo\n' : ''}'
+        'Items: ${validItems.length}\n'
+        'Total weight: ${totalWeight.toStringAsFixed(2)} kg\n'
+        'Total: Rs ${grandTotal.toStringAsFixed(2)}\n'
+        'Thank you!';
+
+    // Build PDF + PNG BEFORE the dialog so clipboard/share run inside a tap
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    Uint8List? pdfBytes;
+    Uint8List? pngBytes;
+    try {
+      pdfBytes = await _generatePdf(context);
+      await for (final page
+      in Printing.raster(pdfBytes, pages: [0], dpi: 144)) {
+        pngBytes = await page.toPng();
+        break;
+      }
+    } catch (e) {
+      print('Purchase invoice build failed: $e');
+    }
+
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    final fileBase = 'Purchase_${purchaseId.length > 6 ? purchaseId.substring(0, 6) : purchaseId}';
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isEn ? 'Send on WhatsApp' : 'واٹس ایپ پر بھیجیں'),
+        content: Text(isEn
+            ? 'Send purchase details to $vendorName ($phone)?\n\n'
+            'Image + Message: the image is copied and WhatsApp opens the '
+            'chat. Press Ctrl+V to attach it.\n\n'
+            'Share Image: pick WhatsApp from the share sheet.'
+            : '$vendorName ($phone) کو خریداری کی تفصیل بھیجیں؟\n\n'
+            'تصویر + پیغام: تصویر کاپی ہوگی اور چیٹ کھلے گی، پھر Ctrl+V دبائیں۔\n\n'
+            'شیئر: شیئر مینو سے واٹس ایپ منتخب کریں۔'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(isEn ? 'Not now' : 'ابھی نہیں'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.message, size: 18),
+            label: Text(isEn ? 'Text Only' : 'صرف پیغام'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _sendWhatsAppTextOnly(number, message);
+            },
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.picture_as_pdf, size: 18),
+            label: Text(isEn ? 'Download PDF' : 'پی ڈی ایف ڈاؤن لوڈ'),
+            onPressed: pdfBytes == null
+                ? null
+                : () => _downloadPDFWeb(pdfBytes!, '$fileBase.pdf'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.share, size: 18),
+            label: Text(isEn ? 'Share Image' : 'تصویر شیئر کریں'),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              final ok = await _shareImageWithText(
+                  pngBytes!, message, '$fileBase.png');
+              if (!ok) {
+                _snack(isEn
+                    ? 'Sharing not supported here. Use Image + Message.'
+                    : 'یہاں شیئرنگ دستیاب نہیں۔ تصویر + پیغام استعمال کریں۔');
+              }
+            },
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.image, size: 18),
+            label: Text(isEn ? 'Image + Message' : 'تصویر + پیغام'),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green, foregroundColor: Colors.white),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              final copied = await _copyImageToClipboard(pngBytes!);
+              await _sendWhatsAppTextOnly(number, message);
+              _snack(copied
+                  ? (isEn
+                  ? 'Image copied. Press Ctrl+V in the chat.'
+                  : 'تصویر کاپی ہو گئی۔ چیٹ میں Ctrl+V دبائیں۔')
+                  : (isEn
+                  ? 'Could not copy the image. Use Share Image or Download PDF.'
+                  : 'تصویر کاپی نہیں ہو سکی۔ شیئر یا پی ڈی ایف استعمال کریں۔'));
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+
+
+
+
+
+
+
+
 
   @override
   void initState() {
@@ -459,6 +708,8 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
               .map((entry) => {
             'key': entry.key,
             'name': entry.value['name'] ?? '',
+            'phone': entry.value['phone'] ?? '',
+
           })
               .toList();
         });
@@ -1535,7 +1786,10 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
                     ? 'خریداری کامیابی سے اپ ڈیٹ ہو گئی!'
                     : 'خریداری کامیابی سے ریکارڈ ہو گئی!')),
           );
+          // Offer WhatsApp BEFORE clearing/popping, while the form data still exists
+          await _offerWhatsAppMessage(purchaseId, validItems);
 
+          if (!mounted) return;
           if (!widget.isEditMode) {
             _clearForm();
           } else {

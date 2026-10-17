@@ -12,6 +12,7 @@ import 'package:printing/printing.dart';
 import 'package:provider/provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:url_launcher/url_launcher.dart';
 import '../Models/itemModel.dart';
 import '../Provider/customerprovider.dart';
 import '../Provider/filled provider.dart';
@@ -22,7 +23,14 @@ import 'package:share_plus/share_plus.dart';
 import 'dart:html' as html;
 import '../bankmanagement/banknames.dart';
 import 'gatepasspage.dart';
+import 'dart:js_interop';
 
+@JS('copyPngToClipboard')
+external JSPromise<JSBoolean> _copyPngToClipboardJs(JSString base64Png);
+
+@JS('sharePngWithText')
+external JSPromise<JSBoolean> _sharePngWithTextJs(
+    JSString base64Png, JSString text, JSString fileName);
 
 class filledpage extends StatefulWidget {
   final Map<String, dynamic>? filled;
@@ -80,6 +88,263 @@ class _filledpageState extends State<filledpage> {
   String? _selectedCustomerSerial;
   Map<String, int> _customerLastNumbers = {};
   String? _lastReferenceNumber;
+
+
+
+  /// 0300-1234567 / +92 300 1234567 -> 923001234567
+  String? _normalizePkNumber(String raw) {
+    var n = raw.replaceAll(RegExp(r'[^0-9+]'), '');
+    if (n.startsWith('+')) n = n.substring(1);
+    if (n.startsWith('00')) n = n.substring(2);
+    if (n.startsWith('0')) n = '92${n.substring(1)}';
+    if (n.startsWith('92') && n.length == 12) return n;
+    return null; // not a valid mobile number
+  }
+
+  /// Browsers can't probe for installed apps; mobile/desktop can.
+  Future<bool> _isWhatsAppAvailable(String number) async {
+    if (kIsWeb) return true;
+    try {
+      return await canLaunchUrl(Uri.parse('whatsapp://send?phone=$number'));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _offerWhatsAppMessage(String invoiceNumber, double grandTotal) async {
+    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    final customerProvider = Provider.of<CustomerProvider>(context, listen: false);
+
+    final customer = customerProvider.customers.firstWhere(
+          (c) => c.id == _selectedCustomerId,
+      orElse: () => Customer(id: '', name: '', phone: '', address: '', city: '', customerSerial: ''),
+    );
+
+    final number = _normalizePkNumber(customer.phone);
+    if (number == null) return;
+    if (!await _isWhatsAppAvailable(number)) return;
+
+    await _fetchRemainingBalance();
+    if (!mounted) return;
+
+    final message = 'Assalam o Alaikum ${customer.name},\n'
+        'Your invoice #$invoiceNumber has been ${widget.filled == null ? 'created' : 'updated'}.\n'
+        'Reference: ${_referenceController.text}\n'
+        'Total: Rs ${grandTotal.toStringAsFixed(2)}\n'
+        'Remaining balance: Rs ${_remainingBalance.toStringAsFixed(2)}\n'
+        'Thank you!';
+
+    // Build PDF + first-page image BEFORE the dialog so the clipboard/share
+    // call can run directly inside the button tap (browser needs a user gesture).
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    Uint8List? pdfBytes;
+    Uint8List? pngBytes;
+    try {
+      pdfBytes = await _generatePDFBytes(invoiceNumber);
+      await for (final page in Printing.raster(pdfBytes, pages: [0], dpi: 144)) {
+        pngBytes = await page.toPng();
+        break;
+      }
+    } catch (e) {
+      print('Invoice build failed: $e');
+    }
+
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop(); // close spinner
+
+    final isEn = languageProvider.isEnglish;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isEn ? 'Send on WhatsApp' : 'واٹس ایپ پر بھیجیں'),
+        content: Text(
+          isEn
+              ? 'Send invoice to ${customer.name} (${customer.phone})?\n\n'
+              'Image + Message: the invoice image is copied and WhatsApp opens '
+              'this customer\'s chat. Press Ctrl+V to attach the image.\n\n'
+              'Share Image: pick WhatsApp from the share sheet, image and text '
+              'go together.'
+              : '${customer.name} (${customer.phone}) کو انوائس بھیجیں؟\n\n'
+              'تصویر + پیغام: تصویر کاپی ہوگی اور واٹس ایپ چیٹ کھلے گی، پھر Ctrl+V دبائیں۔\n\n'
+              'شیئر: شیئر مینو سے واٹس ایپ منتخب کریں، تصویر اور پیغام اکٹھے جائیں گے۔',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(isEn ? 'Not now' : 'ابھی نہیں'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.message, size: 18),
+            label: Text(isEn ? 'Text Only' : 'صرف پیغام'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _sendWhatsAppTextOnly(number, message);
+            },
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.picture_as_pdf, size: 18),
+            label: Text(isEn ? 'Download PDF' : 'پی ڈی ایف ڈاؤن لوڈ'),
+            onPressed: pdfBytes == null
+                ? null
+                : () => _downloadPDFWeb(pdfBytes!, 'Invoice_$invoiceNumber.pdf'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.share, size: 18),
+            label: Text(isEn ? 'Share Image' : 'تصویر شیئر کریں'),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              final shared = await _shareImageWithText(
+                  pngBytes!, message, 'Invoice_$invoiceNumber.png');
+              if (!shared && mounted) {
+                _showSnackBar(
+                  context,
+                  isEn
+                      ? 'Sharing not supported here. Use Image + Message.'
+                      : 'یہاں شیئرنگ دستیاب نہیں۔ تصویر + پیغام استعمال کریں۔',
+                );
+              }
+            },
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.image, size: 18),
+            label: Text(isEn ? 'Image + Message' : 'تصویر + پیغام'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.green,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              // 1) copy image first (still inside the tap gesture)
+              final copied = await _copyImageToClipboard(pngBytes!);
+              // 2) open the installed WhatsApp app directly with text pre-filled
+              await _sendWhatsAppTextOnly(number, message);
+              if (mounted) {
+                _showSnackBar(
+                  context,
+                  copied
+                      ? (isEn
+                      ? 'Invoice image copied. Press Ctrl+V in the chat.'
+                      : 'انوائس کی تصویر کاپی ہو گئی۔ چیٹ میں Ctrl+V دبائیں۔')
+                      : (isEn
+                      ? 'Could not copy the image. Use Share Image or Download PDF.'
+                      : 'تصویر کاپی نہیں ہو سکی۔ شیئر یا پی ڈی ایف استعمال کریں۔'),
+                );
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Copies a PNG to the system clipboard (web only, needs a user tap + https/localhost)
+  Future<bool> _copyImageToClipboard(Uint8List png) async {
+    if (!kIsWeb) return false;
+    try {
+      final result = await _copyPngToClipboardJs(base64Encode(png).toJS).toDart;
+      return result.toDart;
+    } catch (e) {
+      print('Clipboard copy failed: $e');
+      return false;
+    }
+  }
+
+  /// Native share sheet: image + text together (web)
+  Future<bool> _shareImageWithText(Uint8List png, String text, String fileName) async {
+    if (kIsWeb) {
+      try {
+        final result = await _sharePngWithTextJs(
+          base64Encode(png).toJS,
+          text.toJS,
+          fileName.toJS,
+        ).toDart;
+        return result.toDart;
+      } catch (e) {
+        print('Web share failed: $e');
+        return false;
+      }
+    }
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(png);
+      await Share.shareXFiles([XFile(file.path)], text: text);
+      return true;
+    } catch (e) {
+      print('Share failed: $e');
+      return false;
+    }
+  }
+
+  /// Download PDF on web platform
+  Future<void> _downloadPDFWeb(Uint8List pdfBytes, String fileName) async {
+    try {
+      final blob = html.Blob([pdfBytes], 'application/pdf');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      html.AnchorElement(href: url)
+        ..setAttribute('download', fileName)
+        ..click();
+      html.Url.revokeObjectUrl(url);
+    } catch (e) {
+      print('Error downloading PDF on web: $e');
+    }
+  }
+
+  /// Opens the INSTALLED WhatsApp app directly (no api.whatsapp.com / wa.me).
+  /// Name kept so existing callers don't change.
+  Future<void> _sendWhatsAppTextOnly(String number, String message) async {
+    final link = 'whatsapp://send?phone=$number&text=${Uri.encodeComponent(message)}';
+
+    if (kIsWeb) {
+      // Anchor click triggers the OS protocol handler without leaving the page
+      final a = html.AnchorElement(href: link)
+        ..target = '_self'
+        ..style.display = 'none';
+      html.document.body?.append(a);
+      a.click();
+      a.remove();
+    } else {
+      await launchUrl(Uri.parse(link), mode: LaunchMode.externalApplication);
+    }
+  }
+
+
+
+
+  Future<void> _cleanupTempPDFs() async {
+    if (kIsWeb) return; // no temp directory on web
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final files = tempDir.listSync();
+      final now = DateTime.now();
+
+      for (var file in files) {
+        if (file is File && file.path.contains('Invoice_') && file.path.endsWith('.pdf')) {
+          final stat = file.statSync();
+          if (now.difference(stat.modified).inHours > 1) {
+            await file.delete();
+          }
+        }
+      }
+    } catch (e) {
+      print('Error cleaning temp PDFs: $e');
+    }
+  }
+
+
+
+
+
 
   void _showLengthCombinationDialog(Item item, int rowIndex) async {
     final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
@@ -1170,6 +1435,32 @@ class _filledpageState extends State<filledpage> {
     return _filledRows.fold(0.0, (sum, row) => sum + (row['total'] ?? 0.0));
   }
 
+  Future<Uint8List> _renderTextAsImage(
+      String text, {
+        double fontSize = 10,
+        double width = 100,
+        double height = 20,
+      }) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final bgPaint = Paint()..color = const Color(0xFFFFFFFF);
+    canvas.drawRect(Rect.fromLTWH(0, 0, width, height), bgPaint);
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(color: const Color(0xFF000000), fontSize: fontSize),
+      ),
+      textDirection: ui.TextDirection.ltr,
+      maxLines: 1,
+    );
+    textPainter.layout(maxWidth: width - 4);
+    textPainter.paint(canvas, Offset(2, (height - textPainter.height) / 2));
+    final picture = recorder.endRecording();
+    final img = await picture.toImage(width.toInt(), height.toInt());
+    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    return byteData!.buffer.asUint8List();
+  }
+
   double _calculateGrandTotal() {
     double subtotal = _calculateSubtotal();
     // Apply discount (subtract from subtotal)
@@ -1309,6 +1600,70 @@ class _filledpageState extends State<filledpage> {
       }
       return s;
     }
+    );
+
+    // ── Pre-render text as images (same method as purchase page) ──
+    final Map<String, Uint8List> sizeImages = {};
+    final Map<String, Uint8List> lengthImages = {};
+    final Map<String, Uint8List> bodyImages = {};
+    final Map<String, Uint8List> descImages = {};
+
+    String sizeOf(Map<String, dynamic> r) {
+      final s = (r['size']?.toString() ?? '').trim();
+      return s.isNotEmpty ? s : (r['itemName']?.toString() ?? '');
+    }
+
+    for (final r in nonEmptyRows) {
+      final size = sizeOf(r);
+      if (size.isNotEmpty && !sizeImages.containsKey(size)) {
+        sizeImages[size] = await _renderTextAsImage(size,
+            fontSize: 11, width: 130, height: 20);
+      }
+      final length = r['length']?.toString() ?? '';
+      if (length.isNotEmpty && !lengthImages.containsKey(length)) {
+        lengthImages[length] = await _renderTextAsImage(length,
+            fontSize: 11, width: 80, height: 20);
+      }
+      final body = r['bodyType']?.toString() ?? '';
+      if (body.isNotEmpty && !bodyImages.containsKey(body)) {
+        bodyImages[body] = await _renderTextAsImage(body,
+            fontSize: 11, width: 70, height: 20);
+      }
+      final desc = (r['description']?.toString() ?? '').trim();
+      if (desc.isNotEmpty && !descImages.containsKey(desc)) {
+        descImages[desc] = await _renderTextAsImage(desc,
+            fontSize: 11, width: 110, height: 20);
+      }
+    }
+
+// Customer / transport lines (may contain Urdu)
+    final custNameImg = await _renderTextAsImage(
+        'Customer Name: ${selectedCustomer.name}',
+        fontSize: 11, width: 300, height: 18);
+    final custAddrImg = await _renderTextAsImage(
+        'Customer Address: ${selectedCustomer.address}',
+        fontSize: 11, width: 300, height: 18);
+    final transportImg = await _renderTextAsImage(
+        'Transport Company: ${_transportCompanyController.text}',
+        fontSize: 11, width: 250, height: 18);
+
+    pw.Widget imgCell(Uint8List? bytes, String fallback) {
+      if (bytes != null) {
+        return pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 2),
+          child: pw.SizedBox(
+            height: 20,
+            child: pw.Image(pw.MemoryImage(bytes), fit: pw.BoxFit.contain),
+          ),
+        );
+      }
+      return _cell(fallback);
+    }
+
+    pw.Widget lineImg(Uint8List bytes, double w) => pw.SizedBox(
+      width: w,
+      height: 18,
+      child: pw.Image(pw.MemoryImage(bytes), fit: pw.BoxFit.contain),
     );
 
     // ✅ PDF
@@ -1581,17 +1936,30 @@ class _filledpageState extends State<filledpage> {
                 // Get calculation type abbreviation
                 String calcType = r['calculationType'] == 'weight' ? 'Wt×Rate' : 'Qty×Rate';
 
+                // return pw.TableRow(children: [
+                //   _cell(r['itemName'] ?? ''),
+                //   _cell(r['length']?.toString() ?? ''),
+                //   _cell(r['bodyType']?.toString() ?? ''),
+                //   _cell(r['description']?.toString() ?? ''),
+                //   _cell((r['qty'] ?? '0').toString()),
+                //   _cell(weightText),
+                //   _cell((r['rate'] ?? 0).toStringAsFixed(2),
+                //       align: pw.Alignment.centerRight),
+                //   _cell((r['total'] ?? 0).toStringAsFixed(2),
+                //       align: pw.Alignment.centerRight),
+                // ]);
                 return pw.TableRow(children: [
-                  _cell(r['itemName'] ?? ''),
-                  _cell(r['length']?.toString() ?? ''),
-                  _cell(r['bodyType']?.toString() ?? ''),
-                  _cell(r['description']?.toString() ?? ''),
+                  imgCell(sizeImages[sizeOf(r)], sizeOf(r)),
+                  imgCell(lengthImages[r['length']?.toString() ?? ''],
+                      r['length']?.toString() ?? ''),
+                  imgCell(bodyImages[r['bodyType']?.toString() ?? ''],
+                      r['bodyType']?.toString() ?? ''),
+                  imgCell(descImages[(r['description']?.toString() ?? '').trim()],
+                      r['description']?.toString() ?? ''),
                   _cell((r['qty'] ?? '0').toString()),
                   _cell(weightText),
-                  _cell((r['rate'] ?? 0).toStringAsFixed(2),
-                      align: pw.Alignment.centerRight),
-                  _cell((r['total'] ?? 0).toStringAsFixed(2),
-                      align: pw.Alignment.centerRight),
+                  _cell((r['rate'] ?? 0).toStringAsFixed(2), align: pw.Alignment.centerRight),
+                  _cell((r['total'] ?? 0).toStringAsFixed(2), align: pw.Alignment.centerRight),
                 ]);
               }),
 
@@ -2738,6 +3106,7 @@ class _filledpageState extends State<filledpage> {
 
     _fetchItems();
     _initializeReferenceNumber();
+    _cleanupTempPDFs(); // ← Added: clean up old temp PDFs on page load
 
     _biltiNumberController = TextEditingController();
     _transportCompanyController = TextEditingController();
@@ -4828,6 +5197,7 @@ class _filledpageState extends State<filledpage> {
                       ? 'Invoice updated successfully'
                       : 'انوائس کامیابی سے تبدیل ہوگئی'),
                 );
+                await _offerWhatsAppMessage(filledNumber, _calculateGrandTotal());
               } catch (e) {
                 print('Error saving invoice: $e');
                 _showSnackBar(
