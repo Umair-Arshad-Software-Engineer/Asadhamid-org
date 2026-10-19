@@ -43,9 +43,6 @@ class MazdoorProvider with ChangeNotifier {
     return _numberToAlphabetical(lastNumber);
   }
 
-
-
-
   /// Auto-generated reference for a "wire given" ledger entry, purely
   /// for record-keeping / display (e.g. "WG-00001"). Not a trackable
   /// job — there's no outstanding-balance concept tied to it.
@@ -225,8 +222,10 @@ class MazdoorProvider with ChangeNotifier {
     double? quantity,
     double? rate,
     double? weightPerUnit,
+    String? weightUnit,
     double? totalWeight,
     String? batchId,
+    String? batchNumber,
     List<Map<String, dynamic>>? wireLines,
     DateTime? date,
   }) async {
@@ -245,8 +244,10 @@ class MazdoorProvider with ChangeNotifier {
       'quantity': quantity,
       'rate': rate,
       'weightPerUnit': weightPerUnit,
+      'weightUnit': weightUnit ?? 'kg',
       'totalWeight': totalWeight,
       'batchId': batchId,
+      'batchNumber': batchNumber,
       if (wireLines != null) 'wireLines': wireLines,
       'createdAt': (date ?? DateTime.now()).toIso8601String(),
     });
@@ -295,7 +296,9 @@ class MazdoorProvider with ChangeNotifier {
 
   // ─────────────────────────────────────────────────────────────
   // GIVE WIRE (single item, rate based) — mirror of receiveWire.
-  // Debits the Mazdoor by (totalWeight × rate/kg) and deducts stock.
+  // Debits the Mazdoor by `overrideValue` if provided (the exact
+  // amount the UI table shows in the Total column), otherwise by
+  // (totalWeight × rate/kg). Deducts stock and stores length/body.
   // ─────────────────────────────────────────────────────────────
   Future<String> giveWireItem({
     required String mazdoorId,
@@ -304,7 +307,11 @@ class MazdoorProvider with ChangeNotifier {
     required double quantity,
     required double rate,
     double? weightPerUnit,
+    String? weightUnit,
     double? totalWeight,
+    double? overrideValue,
+    String? length,
+    String? bodyType,
     String? batchId,
     String? batchNumber,
     String? description,
@@ -317,15 +324,16 @@ class MazdoorProvider with ChangeNotifier {
         ((weightPerUnit != null && weightPerUnit > 0)
             ? weightPerUnit * quantity
             : quantity);
-    final double wireValue = wt * rate;
+    final double wireValue = overrideValue ?? (wt * rate);
     final reference = await _nextWireReference();
 
     final line = MazdoorWireLine(
       itemName: wireItemName,
-      length: '',
-      bodyType: '',
+      length: length ?? '',
+      bodyType: bodyType ?? '',
       qty: quantity,
       weightPerUnit: weightPerUnit,
+      weightUnit: weightUnit ?? 'kg',
       totalWeight: wt,
       batchId: batchId,
       batchNumber: batchNumber,
@@ -341,8 +349,10 @@ class MazdoorProvider with ChangeNotifier {
       quantity: quantity,
       rate: rate,
       weightPerUnit: weightPerUnit,
+      weightUnit: weightUnit ?? 'kg',
       totalWeight: wt,
       batchId: batchId,
+      batchNumber: batchNumber,
       wireLines: [line.toMap()],
       date: date,
     );
@@ -354,6 +364,7 @@ class MazdoorProvider with ChangeNotifier {
   // ─────────────────────────────────────────────────────────────
   // GIVE BOLTS — Mazdoor is given finished bolts (qty × rate).
   // Debits the Mazdoor and deducts bolt stock from items.
+  // `overrideValue` (from UI Total column) wins when provided.
   // ─────────────────────────────────────────────────────────────
   Future<String> giveBolts({
     required String mazdoorId,
@@ -361,19 +372,21 @@ class MazdoorProvider with ChangeNotifier {
     required String boltItemName,
     required double quantity,
     required double rate,
+    double? overrideValue,
     String? description,
     DateTime? date,
   }) async {
     if (quantity <= 0 || rate <= 0) {
       throw Exception('Quantity and rate must be greater than zero.');
     }
+    final double value = overrideValue ?? (quantity * rate);
     final reference = await _nextWireReference();
 
     await _appendLedgerEntry(
       mazdoorId: mazdoorId,
       reference: reference,
       entryType: 'bolt_given',
-      debit: quantity * rate,
+      debit: value,
       description: description ?? 'Bolts given ($reference)',
       itemName: boltItemName,
       quantity: quantity,
@@ -475,10 +488,10 @@ class MazdoorProvider with ChangeNotifier {
 
   // ─────────────────────────────────────────────────────────────
   // RECEIVE BOLTS: Mazdoor returns finished bolts. Credits the Mazdoor
-  // by (qty * rate), reducing their running balance (can go negative,
-  // meaning you now owe them). Auto-tags the entry with the most recent
-  // wire-given reference for traceability — no picker needed. Adds
-  // bolt stock into `items`.
+  // by `overrideValue` if provided, otherwise (qty * rate), reducing
+  // their running balance (can go negative, meaning you now owe them).
+  // Auto-tags the entry with the most recent wire-given reference for
+  // traceability. Adds bolt stock into `items`.
   // ─────────────────────────────────────────────────────────────
   Future<void> receiveBolts({
     required String mazdoorId,
@@ -487,16 +500,17 @@ class MazdoorProvider with ChangeNotifier {
     required double quantity,
     required double rate,
     String? boltItemId,
+    double? overrideValue,
     String? description,
     DateTime? date,
   }) async {
     if (quantity <= 0 || rate <= 0) {
       throw Exception('Quantity and rate must be greater than zero.');
     }
-    final boltValue = quantity * rate;
+    final double boltValue = overrideValue ?? (quantity * rate);
     final linkedRef = await _mostRecentWireReference(mazdoorId);
-    final entryRef = linkedRef ??
-        'RETURN-${DateTime.now().millisecondsSinceEpoch}';
+    final entryRef =
+        linkedRef ?? 'RETURN-${DateTime.now().millisecondsSinceEpoch}';
 
     await _appendLedgerEntry(
       mazdoorId: mazdoorId,
@@ -586,10 +600,10 @@ class MazdoorProvider with ChangeNotifier {
 
   // ─────────────────────────────────────────────────────────────
   // RECEIVE WIRE: Mazdoor returns raw wire. Credits the Mazdoor by
-  // (weight × rate/kg), reducing their running balance (can go negative,
-  // meaning you now owe them). Auto-tags the entry with the most recent
-  // wire-given reference for traceability. Adds wire stock back into
-  // `items` and, if a batch was chosen, restores that batch's quantity.
+  // `overrideValue` if provided, otherwise (weight × rate/kg). Also
+  // auto-tags with the most recent wire-given reference. Adds wire
+  // stock back into `items` and, if a batch was chosen, restores that
+  // batch's quantity. Stores length/body/weightUnit on the entry.
   // ─────────────────────────────────────────────────────────────
   Future<void> receiveWire({
     required String mazdoorId,
@@ -599,7 +613,11 @@ class MazdoorProvider with ChangeNotifier {
     required double quantity,
     required double rate,
     double? weightPerUnit,
+    String? weightUnit,
     double? totalWeight,
+    double? overrideValue,
+    String? length,
+    String? bodyType,
     String? batchId,
     String? description,
     DateTime? date,
@@ -614,10 +632,22 @@ class MazdoorProvider with ChangeNotifier {
             ? weightPerUnit * quantity
             : quantity);
 
-    final double wireValue = wt * rate;
+    final double wireValue = overrideValue ?? (wt * rate);
     final linkedRef = await _mostRecentWireReference(mazdoorId);
-    final entryRef = linkedRef ??
-        'RETURN-${DateTime.now().millisecondsSinceEpoch}';
+    final entryRef =
+        linkedRef ?? 'RETURN-${DateTime.now().millisecondsSinceEpoch}';
+
+    // Store wire lines so item-wise ledger can show each row cleanly.
+    final line = MazdoorWireLine(
+      itemName: wireItemName,
+      length: length ?? '',
+      bodyType: bodyType ?? '',
+      qty: quantity,
+      weightPerUnit: weightPerUnit,
+      weightUnit: weightUnit ?? 'kg',
+      totalWeight: wt,
+      batchId: batchId,
+    );
 
     await _appendLedgerEntry(
       mazdoorId: mazdoorId,
@@ -629,8 +659,10 @@ class MazdoorProvider with ChangeNotifier {
       quantity: quantity,
       rate: rate,
       weightPerUnit: weightPerUnit,
+      weightUnit: weightUnit ?? 'kg',
       totalWeight: wt,
       batchId: batchId,
+      wireLines: [line.toMap()],
       date: date,
     );
 
@@ -647,8 +679,8 @@ class MazdoorProvider with ChangeNotifier {
       await _createReturnBatch(
         itemName: wireItemName,
         itemKey: itemKey,
-        length: '',
-        bodyType: '',
+        length: length ?? '',
+        bodyType: bodyType ?? '',
         totalWeight: wt,
         ratePerKg: rate,
         entryType: 'wire_return',
@@ -698,8 +730,8 @@ class MazdoorProvider with ChangeNotifier {
 
     await _appendLedgerEntry(
       mazdoorId: mazdoorId,
-      reference: linkedRef ??
-          'RETURN-${DateTime.now().millisecondsSinceEpoch}',
+      reference:
+      linkedRef ?? 'RETURN-${DateTime.now().millisecondsSinceEpoch}',
       entryType: 'cash_payment',
       credit: amount,
       description: description ?? 'Cash payment',

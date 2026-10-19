@@ -1,17 +1,33 @@
+// vendor_ledger_page.dart
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
-import 'package:flutter/services.dart';
 import 'package:pdf/pdf.dart';
-import 'package:printing/printing.dart';
 import 'package:pdf/widgets.dart' as pw;
-import 'dart:io';
-import 'package:path_provider/path_provider.dart';
+import 'package:printing/printing.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:intl/intl.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:universal_html/html.dart' as html;
+import 'dart:js_interop';
 
 import '../Provider/lanprovider.dart';
 import '../bankmanagement/banknames.dart';
+import '../Purchase/pdf_branding.dart';
+
+// Web-only clipboard helpers (same as ItemPurchasePage)
+@JS('copyPngToClipboard')
+external JSPromise<JSBoolean> _copyPngToClipboardJs(JSString base64Png);
+
+@JS('sharePngWithText')
+external JSPromise<JSBoolean> _sharePngWithTextJs(
+    JSString base64Png, JSString text, JSString fileName);
 
 class VendorLedgerPage extends StatefulWidget {
   final String vendorId;
@@ -38,508 +54,6 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
   Set<String> _expandedPurchases = {};
   Map<String, List<Map<String, dynamic>>> _purchaseItems = {};
 
-  @override
-  void initState() {
-    super.initState();
-    _fetchLedgerData();
-  }
-
-  Future<void> _printLedger() async {
-    try {
-      final pdf = pw.Document();
-
-      // Load the logo image
-      final logoImage = await rootBundle.load('assets/images/logo.png');
-      final logo = pw.MemoryImage(logoImage.buffer.asUint8List());
-
-      // Load bank logos
-      Map<String, pw.MemoryImage> bankLogoImages = {};
-      for (var bank in pakistaniBanks) {
-        try {
-          final logoBytes = await rootBundle.load(bank.iconPath);
-          final logoBuffer = logoBytes.buffer.asUint8List();
-          bankLogoImages[bank.name.toLowerCase()] = pw.MemoryImage(logoBuffer);
-        } catch (e) {
-          print('Error loading bank logo: ${bank.iconPath} - $e');
-        }
-      }
-
-      // Calculate totals for PDF
-      double totalDebit = 0.0;
-      double totalCredit = 0.0;
-      double finalBalance = 0.0;
-      double totalQuantity = 0.0;
-      double totalWeight = 0.0;
-
-      for (var entry in _filteredLedgerEntries) {
-        totalDebit += (entry['debit'] ?? 0).toDouble();
-        totalCredit += (entry['credit'] ?? 0).toDouble();
-        finalBalance = (entry['balance'] ?? 0).toDouble(); // This will be the last balance
-
-        // Calculate quantity and weight for purchases
-        if (entry['description'] == 'Purchase' && _isPurchaseExpanded(entry['purchaseId'])) {
-          final purchaseItems = _purchaseItems[entry['purchaseId']] ?? [];
-          totalQuantity += purchaseItems.fold(0.0, (sum, item) => sum + (item['quantity'] ?? 0));
-          totalWeight += purchaseItems.fold(0.0, (sum, item) => sum + (item['weight'] ?? 0));
-        }
-      }
-
-      pdf.addPage(
-        pw.MultiPage(
-          pageFormat: PdfPageFormat.a4,
-          margin: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 20),
-          build: (pw.Context context) {
-            return [
-              // Header
-              pw.Header(
-                  level: 0,
-                  child: pw.Row(
-                      children: [
-                        pw.Image(logo, width: 200, height: 150),
-                        pw.Spacer(),
-                        pw.Text(
-                          'Vendor Ledger',
-                          style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
-                        ),
-                      ]
-                  )
-              ),
-              pw.SizedBox(height: 8),
-
-              // Vendor Info and Date Range
-              pw.Row(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Expanded(
-                    child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        pw.Text('Vendor: ${widget.vendorName}',
-                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                      ],
-                    ),
-                  ),
-                  pw.Expanded(
-                    child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.end,
-                      children: [
-                        if (_selectedDateRange != null)
-                          pw.Text(
-                              'Date Range: ${DateFormat('dd MMM yy').format(_selectedDateRange!.start)} - ${DateFormat('dd MMM yy').format(_selectedDateRange!.end)}'
-                          ),
-                        pw.Text('Generated: ${DateFormat('dd MMM yyyy hh:mm a').format(DateTime.now())}'),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-
-              pw.Header(
-                level: 1,
-                child: pw.Text('Transaction Details'),
-              ),
-
-              // Ledger Table
-              _buildPDFLedgerTable(bankLogoImages, totalDebit, totalCredit, finalBalance, totalQuantity, totalWeight),
-            ];
-          },
-        ),
-      );
-
-      await Printing.layoutPdf(onLayout: (format) => pdf.save());
-    } catch (e) {
-      print('Error generating PDF: $e');
-    }
-  }
-
-  pw.Widget _buildPDFLedgerTable(
-      Map<String, pw.MemoryImage> bankLogoImages,
-      double totalDebit,
-      double totalCredit,
-      double finalBalance,
-      double totalQuantity,
-      double totalWeight
-      )
-  {
-    List<pw.Widget> rows = [];
-
-    // Helper method to format date
-    String _getFormattedDate(String dateString, bool isOpeningBalance) {
-      if (isOpeningBalance) {
-        return dateString;
-      }
-      final DateTime? parsedDate = DateTime.tryParse(dateString);
-      if (parsedDate != null) {
-        return DateFormat('dd MMM yyyy').format(parsedDate);
-      }
-      return "Unknown Date";
-    }
-
-    // Table header
-    rows.add(
-      pw.Container(
-        decoration: pw.BoxDecoration(color: PdfColors.grey200),
-        child: pw.Row(
-          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-          children: [
-            _buildPdfHeaderCell('Date', 60),
-            _buildPdfHeaderCell('Transaction', 70),
-            _buildPdfHeaderCell('Description', 80),
-            _buildPdfHeaderCell('Method', 50),
-            _buildPdfHeaderCell('Bank', 70),
-            _buildPdfHeaderCell('Qty', 40),
-            _buildPdfHeaderCell('Weight', 50),
-            _buildPdfHeaderCell('Debit', 50),
-            _buildPdfHeaderCell('Credit', 50),
-            _buildPdfHeaderCell('Balance', 60),
-          ],
-        ),
-      ),
-    );
-
-    // Sort entries by date
-    List<Map<String, dynamic>> sortedEntries = List.from(_filteredLedgerEntries);
-    sortedEntries.sort((a, b) {
-      final dateA = DateTime.tryParse(_getDisplayDate(a)) ?? DateTime(2000);
-      final dateB = DateTime.tryParse(_getDisplayDate(b)) ?? DateTime(2000);
-      return dateA.compareTo(dateB);
-    });
-
-    // Add ledger entries
-    for (var entry in sortedEntries) {
-      final isOpeningBalance = entry['description'] == 'Opening Balance';
-      final isPayment = entry['description'].toString().contains('Payment');
-      final isPurchase = entry['description'].toString().contains('Purchase');
-
-      final displayDate = _getFormattedDate(_getDisplayDate(entry), isOpeningBalance);
-      final transactionType = isPurchase ? 'Purchase' : (isPayment ? 'Payment' : 'Balance');
-      final descriptionText = entry['description2'] ?? entry['description'];
-      final method = isPayment ? (entry['method'] ?? '-') : '-';
-      final bankName = _getBankName(entry);
-      final bankLogo = bankName != null ? bankLogoImages[bankName.toLowerCase()] : null;
-
-      // Calculate quantity and weight for purchases
-      double quantity = 0.0;
-      double weight = 0.0;
-      if (isPurchase && _isPurchaseExpanded(entry['purchaseId'])) {
-        final purchaseItems = _purchaseItems[entry['purchaseId']] ?? [];
-        quantity = purchaseItems.fold(0.0, (sum, item) => sum + (item['quantity'] ?? 0));
-        weight = purchaseItems.fold(0.0, (sum, item) => sum + (item['weight'] ?? 0));
-      }
-
-      final debit = (entry['debit'] ?? 0).toDouble();
-      final credit = (entry['credit'] ?? 0).toDouble();
-      final balance = (entry['balance'] ?? 0).toDouble();
-
-      // Main transaction row
-      rows.add(
-        pw.Container(
-          padding: const pw.EdgeInsets.all(6),
-          decoration: const pw.BoxDecoration(
-            border: pw.Border(
-              bottom: pw.BorderSide(color: PdfColors.grey300, width: 0.5),
-            ),
-          ),
-          child: pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              _buildPdfDataCell(displayDate, 60),
-              _buildPdfDataCell(transactionType, 70),
-              _buildPdfDataCell(descriptionText, 80),
-              _buildPdfDataCell(method, 50),
-              _buildBankCell(bankName, bankLogo, 70),
-              _buildPdfDataCell(isPurchase ? quantity.toStringAsFixed(2) : '-', 40),
-              _buildPdfDataCell(isPurchase ? weight.toStringAsFixed(2) : '-', 50),
-              _buildPdfDataCell(
-                debit > 0 ? 'Rs ${debit.toStringAsFixed(2)}' : '-',
-                50,
-                textColor: debit > 0 ? PdfColors.red : PdfColors.black,
-              ),
-              _buildPdfDataCell(
-                credit > 0 ? 'Rs ${credit.toStringAsFixed(2)}' : '-',
-                50,
-                textColor: credit > 0 ? PdfColors.green800 : PdfColors.black,
-              ),
-              _buildPdfDataCell(
-                'Rs ${balance.toStringAsFixed(2)}',
-                60,
-                fontWeight: pw.FontWeight.bold,
-                textColor: PdfColors.blue800,
-              ),
-            ],
-          ),
-        ),
-      );
-
-      // Add purchase details if expanded
-      if (isPurchase && _isPurchaseExpanded(entry['purchaseId'])) {
-        final purchaseItems = _purchaseItems[entry['purchaseId']] ?? [];
-        final refNo = entry['refNo']?.toString() ?? '';
-
-        if (purchaseItems.isNotEmpty) {
-          rows.add(
-            pw.Container(
-              margin: const pw.EdgeInsets.only(left: 20, top: 4, bottom: 4),
-              padding: const pw.EdgeInsets.all(6),
-              decoration: pw.BoxDecoration(
-                border: pw.Border.all(color: PdfColors.grey400, width: 0.5),
-                borderRadius: pw.BorderRadius.circular(4),
-                color: PdfColors.grey100,
-              ),
-              child: pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  if (refNo.isNotEmpty)
-                    pw.Text(
-                      'Reference No: $refNo',
-                      style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
-                    ),
-                  pw.SizedBox(height: 4),
-                  pw.Table(
-                    border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.3),
-                    columnWidths: {
-                      0: const pw.FlexColumnWidth(3), // Size (Item Name)
-                      1: const pw.FlexColumnWidth(2), // Description
-                      2: const pw.FlexColumnWidth(1), // Rate
-                      3: const pw.FlexColumnWidth(1), // Wt/Unit
-                      4: const pw.FlexColumnWidth(1), // Qty
-                      5: const pw.FlexColumnWidth(1.2), // Total Weight
-                      6: const pw.FlexColumnWidth(1.2), // Total Amount
-                    },
-                    children: [
-                      pw.TableRow(
-                        children: [
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text("Size", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
-                          ),
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text("Description", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
-                          ),
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text("Rate", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold), textAlign: pw.TextAlign.right),
-                          ),
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text("Wt/Unit", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold), textAlign: pw.TextAlign.right),
-                          ),
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text("Qty", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold), textAlign: pw.TextAlign.right),
-                          ),
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text("Total Wt", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold), textAlign: pw.TextAlign.right),
-                          ),
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text("Total", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold), textAlign: pw.TextAlign.right),
-                          ),
-                        ],
-                      ),
-                      ...purchaseItems.map<pw.TableRow>((item) {
-                        final itemQuantity = item['quantity'] ?? 0.0;
-                        final itemWeightPerUnit = item['weight'] ?? 0.0;
-                        final itemRate = item['price'] ?? item['purchasePrice'] ?? 0.0;
-                        final totalWeight = itemQuantity * itemWeightPerUnit;
-                        final totalAmount = totalWeight * itemRate;
-
-                        return pw.TableRow(
-                          children: [
-                            pw.Padding(
-                              padding: const pw.EdgeInsets.all(3),
-                              child: pw.Text(item['itemName']?.toString() ?? '-', style: const pw.TextStyle(fontSize: 11)),
-                            ),
-                            pw.Padding(
-                              padding: const pw.EdgeInsets.all(3),
-                              child: pw.Text(item['description']?.toString() ?? '-', style: const pw.TextStyle(fontSize: 11)),
-                            ),
-                            pw.Padding(
-                              padding: const pw.EdgeInsets.all(3),
-                              child: pw.Text("Rs ${itemRate.toStringAsFixed(2)}", style: const pw.TextStyle(fontSize: 11), textAlign: pw.TextAlign.right),
-                            ),
-                            pw.Padding(
-                              padding: const pw.EdgeInsets.all(3),
-                              child: pw.Text("${itemWeightPerUnit.toStringAsFixed(2)} kg", style: const pw.TextStyle(fontSize: 11), textAlign: pw.TextAlign.right),
-                            ),
-                            pw.Padding(
-                              padding: const pw.EdgeInsets.all(3),
-                              child: pw.Text("${itemQuantity.toStringAsFixed(2)}", style: const pw.TextStyle(fontSize: 11), textAlign: pw.TextAlign.right),
-                            ),
-                            pw.Padding(
-                              padding: const pw.EdgeInsets.all(3),
-                              child: pw.Text("${totalWeight.toStringAsFixed(2)} kg", style: const pw.TextStyle(fontSize: 11), textAlign: pw.TextAlign.right),
-                            ),
-                            pw.Padding(
-                              padding: const pw.EdgeInsets.all(3),
-                              child: pw.Text(
-                                "Rs ${totalAmount.toStringAsFixed(2)}",
-                                style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold),
-                                textAlign: pw.TextAlign.right,
-                              ),
-                            ),
-                          ],
-                        );
-                      }),
-                      // Purchase Grand Total Row
-                      pw.TableRow(
-                        children: [
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text("Grand Total", style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold)),
-                          ),
-                          pw.SizedBox(),
-                          pw.SizedBox(),
-                          pw.SizedBox(),
-                          pw.SizedBox(),
-                          pw.SizedBox(),
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.all(3),
-                            child: pw.Text(
-                              "Rs ${(entry['grandTotal'] ?? credit).toStringAsFixed(2)}",
-                              style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: PdfColors.green800),
-                              textAlign: pw.TextAlign.right,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          );
-        }
-      }
-    }
-
-    // Add summary row
-    rows.add(
-      pw.Container(
-        padding: const pw.EdgeInsets.all(6),
-        decoration: pw.BoxDecoration(
-          border: const pw.Border(
-            top: pw.BorderSide(color: PdfColors.orange, width: 1.5),
-          ),
-        ),
-        child: pw.Row(
-          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-          children: [
-            _buildPdfDataCell('TOTALS', 60, fontWeight: pw.FontWeight.bold),
-            _buildPdfDataCell('', 70),
-            _buildPdfDataCell('', 80),
-            _buildPdfDataCell('', 50),
-            _buildPdfDataCell('', 70),
-            _buildPdfDataCell(totalQuantity.toStringAsFixed(2), 40, fontWeight: pw.FontWeight.bold),
-            _buildPdfDataCell(totalWeight.toStringAsFixed(2), 50, fontWeight: pw.FontWeight.bold),
-            _buildPdfDataCell(
-              'Rs ${totalDebit.toStringAsFixed(2)}',
-              50,
-              fontWeight: pw.FontWeight.bold,
-              textColor: PdfColors.red,
-            ),
-            _buildPdfDataCell(
-              'Rs ${totalCredit.toStringAsFixed(2)}',
-              50,
-              fontWeight: pw.FontWeight.bold,
-              textColor: PdfColors.green800,
-            ),
-            _buildPdfDataCell(
-              'Rs ${finalBalance.toStringAsFixed(2)}',
-              60,
-              fontWeight: pw.FontWeight.bold,
-              textColor: finalBalance > 0 ? PdfColors.green : PdfColors.red,
-            ),
-          ],
-        ),
-      ),
-    );
-
-    return pw.Column(children: rows);
-  }
-
-  pw.Widget _buildBankCell(String? bankName, pw.MemoryImage? bankLogo, double width) {
-    return pw.Container(
-      width: width,
-      padding: const pw.EdgeInsets.all(6),
-      decoration: const pw.BoxDecoration(
-        border: pw.Border(right: pw.BorderSide(color: PdfColors.grey300)),
-      ),
-      child: bankName != null && bankLogo != null
-          ? pw.Row(
-        mainAxisAlignment: pw.MainAxisAlignment.center,
-        children: [
-          pw.Container(
-            width: 15,
-            height: 15,
-            margin: const pw.EdgeInsets.only(right: 4),
-            child: pw.Image(bankLogo),
-          ),
-          pw.Expanded(
-            child: pw.Text(
-              bankName,
-              style: const pw.TextStyle(fontSize: 8),
-              textAlign: pw.TextAlign.center,
-              maxLines: 2,
-            ),
-          ),
-        ],
-      )
-          : pw.Text(
-        bankName ?? '-',
-        style: const pw.TextStyle(fontSize: 8),
-        textAlign: pw.TextAlign.center,
-      ),
-    );
-  }
-
-  pw.Widget _buildPdfHeaderCell(String text, double width) {
-    return pw.Container(
-      width: width,
-      padding: const pw.EdgeInsets.all(6),
-      decoration: const pw.BoxDecoration(
-        border: pw.Border(right: pw.BorderSide(color: PdfColors.grey300)),
-      ),
-      child: pw.Text(
-        text,
-        style: pw.TextStyle(
-          fontWeight: pw.FontWeight.bold,
-          color: PdfColors.orange800,
-          fontSize: 9,
-        ),
-        textAlign: pw.TextAlign.center,
-        maxLines: 2,
-      ),
-    );
-  }
-
-  pw.Widget _buildPdfDataCell(
-      String text,
-      double width, {
-        PdfColor? textColor,
-        pw.FontWeight? fontWeight,
-      }) {
-    return pw.Container(
-      width: width,
-      padding: const pw.EdgeInsets.all(6),
-      decoration: const pw.BoxDecoration(
-        border: pw.Border(right: pw.BorderSide(color: PdfColors.grey300)),
-      ),
-      child: pw.Text(
-        text,
-        style: pw.TextStyle(
-          fontSize: 8,
-          color: textColor ?? PdfColors.black,
-          fontWeight: fontWeight,
-        ),
-        textAlign: pw.TextAlign.center,
-        maxLines: 2,
-      ),
-    );
-  }
-
   static final Map<String, String> _bankIconMap = _createBankIconMap();
 
   static Map<String, String> _createBankIconMap() {
@@ -549,72 +63,773 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
     };
   }
 
-  String? _getBankName(Map<String, dynamic> transaction) {
-    if (transaction['bankName'] != null && transaction['bankName'].toString().isNotEmpty) {
-      return transaction['bankName'].toString();
+  @override
+  void initState() {
+    super.initState();
+    _fetchLedgerData();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // WhatsApp helpers
+  // ═══════════════════════════════════════════════════════════════════
+
+  String? _normalizePkNumber(String raw) {
+    if (raw.trim().isEmpty) return null;
+    var n = raw.replaceAll(RegExp(r'[^0-9+]'), '');
+    if (n.startsWith('+')) n = n.substring(1);
+    if (n.startsWith('00')) n = n.substring(2);
+    if (n.startsWith('0')) n = '92${n.substring(1)}';
+    if (n.startsWith('92') && n.length == 12) return n;
+    return null;
+  }
+
+  Future<bool> _isWhatsAppAvailable(String number) async {
+    if (kIsWeb) return true;
+    try {
+      return await canLaunchUrl(Uri.parse('whatsapp://send?phone=$number'));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _copyImageToClipboard(Uint8List png) async {
+    if (!kIsWeb) return false;
+    try {
+      final r = await _copyPngToClipboardJs(base64Encode(png).toJS).toDart;
+      return r.toDart;
+    } catch (e) {
+      debugPrint('Clipboard copy failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _shareImageWithText(
+      Uint8List png, String text, String fileName) async {
+    if (kIsWeb) {
+      try {
+        final r = await _sharePngWithTextJs(
+            base64Encode(png).toJS, text.toJS, fileName.toJS)
+            .toDart;
+        return r.toDart;
+      } catch (e) {
+        debugPrint('Web share failed: $e');
+        return false;
+      }
+    }
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(png);
+      await Share.shareXFiles([XFile(file.path)], text: text);
+      return true;
+    } catch (e) {
+      debugPrint('Share failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _sendWhatsAppTextOnly(String number, String message) async {
+    final link =
+        'whatsapp://send?phone=$number&text=${Uri.encodeComponent(message)}';
+    if (kIsWeb) {
+      final a = html.AnchorElement(href: link)
+        ..target = '_self'
+        ..style.display = 'none';
+      html.document.body?.append(a);
+      a.click();
+      a.remove();
+    } else {
+      await launchUrl(Uri.parse(link),
+          mode: LaunchMode.externalApplication);
+    }
+  }
+
+  Future<void> _shareWhatsApp() async {
+    // Vendor phone is not stored on the page; use a generic share.
+    // If the vendor has a phone number in Firebase, fetch it first.
+    String phone = '';
+    try {
+      final snap = await FirebaseDatabase.instance
+          .ref('vendors/${widget.vendorId}/phone')
+          .get();
+      if (snap.exists) phone = snap.value?.toString() ?? '';
+    } catch (_) {}
+
+    final number = _normalizePkNumber(phone);
+    if (number == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'No valid WhatsApp number on file for this vendor. Please add a phone number in the vendor profile.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
     }
 
-    String paymentMethod = transaction['paymentMethod']?.toString().toLowerCase() ?? '';
-    if (paymentMethod == 'cheque' || paymentMethod == 'check') {
-      if (transaction['chequeBankName'] != null && transaction['chequeBankName'].toString().isNotEmpty) {
+    if (!await _isWhatsAppAvailable(number)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('WhatsApp is not available on this device.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final pdf = await _buildVendorLedgerPdf();
+    if (pdf == null) return;
+    final bytes = await pdf.save();
+
+    Uint8List? pngBytes;
+    try {
+      await for (final page in Printing.raster(bytes, pages: [0], dpi: 110)) {
+        pngBytes = await page.toPng();
+        break;
+      }
+    } catch (e) {
+      debugPrint('Raster failed: $e');
+    }
+
+    final periodText = _selectedDateRange != null
+        ? '${DateFormat('dd MMM yy').format(_selectedDateRange!.start)} – '
+        '${DateFormat('dd MMM yy').format(_selectedDateRange!.end)}'
+        : 'All Transactions';
+
+    final message = 'Assalam o Alaikum ${widget.vendorName},\n'
+        'Aap ka vendor ledger statement attached hai.\n'
+        'Period: $periodText\n'
+        'Closing Balance: Rs ${_currentBalance.toStringAsFixed(2)}\n'
+        '${DateFormat('dd/MM/yyyy').format(DateTime.now())}\n'
+        'Mughal Group of Industries';
+
+    final safeName =
+    widget.vendorName.replaceAll(RegExp(r'[^A-Za-z0-9]'), '_');
+    final stamp = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
+    final fileBase = 'Vendor_Ledger_${safeName}_$stamp';
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Send on WhatsApp'),
+        content: Text(
+            'How would you like to send this statement to ${widget.vendorName}?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.message, size: 18),
+            label: const Text('Text'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _sendWhatsAppTextOnly(number, message);
+            },
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.picture_as_pdf, size: 18),
+            label: const Text('PDF file'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await Printing.sharePdf(
+                  bytes: bytes, filename: '$fileBase.pdf');
+            },
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.image, size: 18),
+            label: const Text('Image + Message'),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              if (kIsWeb) {
+                final copied =
+                await _copyImageToClipboard(pngBytes!);
+                await _sendWhatsAppTextOnly(number, message);
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(copied
+                        ? 'Image copied. Press Ctrl+V in the chat.'
+                        : 'Could not copy the image. Use PDF file option.'),
+                  ),
+                );
+              } else {
+                final ok = await _shareImageWithText(
+                    pngBytes!, message, '$fileBase.png');
+                if (!ok && mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                          'Sharing not supported here. Use PDF file.'),
+                    ),
+                  );
+                }
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // PDF — Mughal Group branded
+  // ═══════════════════════════════════════════════════════════════════
+  Future<pw.Document?> _buildVendorLedgerPdf() async {
+    try {
+      await PdfBranding.ensureAssets();
+
+      final pdf = pw.Document();
+
+      // ─── Totals ───
+      double totalDebit = 0.0;
+      double totalCredit = 0.0;
+      double finalBalance = 0.0;
+      double openingBalance = 0.0;
+      for (final e in _filteredLedgerEntries) {
+        final d = (e['debit'] ?? 0).toDouble();
+        final c = (e['credit'] ?? 0).toDouble();
+        totalDebit += d;
+        totalCredit += c;
+        finalBalance = (e['balance'] ?? 0).toDouble();
+        if (e['description'] == 'Opening Balance') openingBalance = c;
+      }
+
+      // ─── Urdu-safe images ───
+      final jobs = <Future<void>>[];
+      final Map<String, pw.MemoryImage> vendorImgs = {};
+      final Map<String, pw.MemoryImage> itemImgs = {};
+      final Map<String, pw.MemoryImage> descImgs = {};
+      final Map<String, pw.MemoryImage> bankImgs = {};
+
+      void queue(Map<String, pw.MemoryImage> target, String text,
+          double fs, double w, double h) {
+        if (!PdfBranding.needsImage(text) || target.containsKey(text)) return;
+        jobs.add(PdfBranding.textImage(text,
+            fontSize: fs, width: w, height: h)
+            .then((img) => target[text] = img));
+      }
+
+      queue(vendorImgs, widget.vendorName.trim(), 42, 165 * 3, 66);
+
+      for (final entry in _filteredLedgerEntries) {
+        final desc = (entry['description2'] ?? entry['description'] ?? '')
+            .toString();
+        if (desc.isNotEmpty) queue(descImgs, desc, 11, 160, 20);
+
+        final bName = _getBankName(entry) ?? '';
+        if (bName.isNotEmpty) queue(bankImgs, bName, 42, 165 * 3, 66);
+
+        if (entry['description'] == 'Purchase' &&
+            _isPurchaseExpanded(entry['purchaseId'])) {
+          for (final it in _purchaseItems[entry['purchaseId']] ?? []) {
+            final n = it['itemName']?.toString() ?? '';
+            if (n.isNotEmpty) queue(itemImgs, n, 42, 228, 66);
+          }
+        }
+      }
+      await Future.wait(jobs);
+
+      // ─── Vendor details ───
+      pw.Widget vendorSection() => pw.Column(children: [
+        PdfBranding.sectionHeader('VENDOR DETAILS'),
+        PdfBranding.sectionBody(pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Expanded(
+                  child: pw.Column(children: [
+                    PdfBranding.field('Vendor Name',
+                        img: vendorImgs[widget.vendorName.trim()],
+                        text: widget.vendorName),
+                  ])),
+              pw.SizedBox(width: 18),
+              pw.Expanded(
+                  child: pw.Column(children: [
+                    PdfBranding.field(
+                        'Date Range',
+                        text: _selectedDateRange != null
+                            ? '${DateFormat('dd MMM yy').format(_selectedDateRange!.start)} – ${DateFormat('dd MMM yy').format(_selectedDateRange!.end)}'
+                            : 'All Transactions'),
+                  ])),
+            ])),
+      ]);
+
+      // ─── Transactions table ───
+      pw.Widget transactionsSection() {
+        final headers = [
+          'Date',
+          'Type',
+          'Description',
+          'Method',
+          'Bank',
+          'Qty',
+          'Weight',
+          'Debit',
+          'Credit',
+          'Balance',
+        ];
+
+        final sorted = List<Map<String, dynamic>>.from(_filteredLedgerEntries);
+        sorted.sort((a, b) {
+          final da = DateTime.tryParse(_getDisplayDate(a)) ?? DateTime(2000);
+          final db = DateTime.tryParse(_getDisplayDate(b)) ?? DateTime(2000);
+          return da.compareTo(db);
+        });
+
+        final rows = <pw.TableRow>[];
+
+        for (int i = 0; i < sorted.length; i++) {
+          final entry = sorted[i];
+          final isOpening = entry['description'] == 'Opening Balance';
+          final isPayment =
+          entry['description'].toString().contains('Payment');
+          final isPurchase =
+          entry['description'].toString().contains('Purchase');
+
+          final displayDate = _getFormattedDate(
+              _getDisplayDate(entry), isOpening);
+          final transactionType = isPurchase
+              ? 'Purchase'
+              : (isPayment ? 'Payment' : 'Balance');
+          final descText =
+          (entry['description2'] ?? entry['description'] ?? '').toString();
+          final method = isPayment ? (entry['method'] ?? '-') : '-';
+          final bName = _getBankName(entry) ?? '-';
+
+          double qty = 0.0;
+          double wt = 0.0;
+          if (isPurchase && _isPurchaseExpanded(entry['purchaseId'])) {
+            final items = _purchaseItems[entry['purchaseId']] ?? [];
+            qty = items.fold(0.0, (s, it) => s + ((it['quantity'] ?? 0) as num).toDouble());
+            wt = items.fold(0.0, (s, it) => s + ((it['weight'] ?? 0) as num).toDouble());
+          }
+
+          final debit = (entry['debit'] ?? 0).toDouble();
+          final credit = (entry['credit'] ?? 0).toDouble();
+          final balance = (entry['balance'] ?? 0).toDouble();
+
+          rows.add(pw.TableRow(
+            decoration: pw.BoxDecoration(
+                color: i.isEven ? PdfColors.white : PdfBranding.softBg),
+            children: [
+              PdfBranding.cell(displayDate),
+              PdfBranding.cell(transactionType, bold: true),
+              PdfBranding.imgCell(descImgs[descText], descText, h: 16),
+              PdfBranding.cell(method),
+              PdfBranding.imgCell(bankImgs[bName], bName, h: 16),
+              PdfBranding.cell(
+                  isPurchase ? qty.toStringAsFixed(2) : '-'),
+              PdfBranding.cell(
+                  isPurchase ? wt.toStringAsFixed(2) : '-'),
+              PdfBranding.cell(
+                  debit > 0 ? 'Rs ${debit.toStringAsFixed(2)}' : '-'),
+              PdfBranding.cell(
+                  credit > 0 ? 'Rs ${credit.toStringAsFixed(2)}' : '-'),
+              PdfBranding.cell(
+                  'Rs ${balance.toStringAsFixed(2)}',
+                  bold: true),
+            ],
+          ));
+
+          // Expanded purchase items sub-table
+          if (isPurchase && _isPurchaseExpanded(entry['purchaseId'])) {
+            final items = _purchaseItems[entry['purchaseId']] ?? [];
+            if (items.isNotEmpty) {
+              rows.add(pw.TableRow(children: [
+                pw.Padding(
+                  padding: const pw.EdgeInsets.only(
+                      left: 12, top: 4, bottom: 4, right: 12),
+                  child: _purchaseItemsSubTable(items, itemImgs),
+                ),
+                for (int k = 0; k < headers.length - 1; k++)
+                  pw.SizedBox(),
+              ]));
+            }
+          }
+        }
+
+        // Totals row
+        rows.add(pw.TableRow(
+          decoration: pw.BoxDecoration(color: PdfBranding.orange),
+          children: [
+            PdfBranding.headCell('TOTALS'),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(
+                'Rs ${totalDebit.toStringAsFixed(2)}'),
+            PdfBranding.headCell(
+                'Rs ${totalCredit.toStringAsFixed(2)}'),
+            PdfBranding.headCell(
+                'Rs ${finalBalance.toStringAsFixed(2)}'),
+          ],
+        ));
+
+        return pw.Column(children: [
+          PdfBranding.sectionHeader('TRANSACTION DETAILS'),
+          pw.Table(
+            border: pw.TableBorder(
+              left: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+              right: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+              bottom: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+              horizontalInside:
+              pw.BorderSide(color: PdfBranding.softLine, width: 0.4),
+              verticalInside:
+              pw.BorderSide(color: PdfBranding.softLine, width: 0.4),
+            ),
+            defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
+            columnWidths: const {
+              0: pw.FlexColumnWidth(1.2),
+              1: pw.FlexColumnWidth(1.0),
+              2: pw.FlexColumnWidth(2.0),
+              3: pw.FlexColumnWidth(1.0),
+              4: pw.FlexColumnWidth(1.2),
+              5: pw.FlexColumnWidth(0.8),
+              6: pw.FlexColumnWidth(0.9),
+              7: pw.FlexColumnWidth(1.1),
+              8: pw.FlexColumnWidth(1.1),
+              9: pw.FlexColumnWidth(1.2),
+            },
+            children: [
+              pw.TableRow(
+                decoration: pw.BoxDecoration(color: PdfBranding.navy),
+                children: headers.map(PdfBranding.headCell).toList(),
+              ),
+              ...rows,
+            ],
+          ),
+        ]);
+      }
+
+      // ─── Summary boxes ───
+      pw.Widget summaryBox() => PdfBranding.framed(pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            PdfBranding.boxTitle('STATEMENT SUMMARY'),
+            pw.SizedBox(height: 6),
+            pw.Expanded(
+              child: pw.Container(
+                width: double.infinity,
+                padding: const pw.EdgeInsets.symmetric(horizontal: 8),
+                color: PdfBranding.softBg,
+                child: pw.Column(
+                    mainAxisAlignment: pw.MainAxisAlignment.center,
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      PdfBranding.sumRow(
+                          'Total Debit',
+                          'Rs ${totalDebit.toStringAsFixed(2)}',
+                          bold: true),
+                      PdfBranding.sumRow(
+                          'Total Credit',
+                          'Rs ${totalCredit.toStringAsFixed(2)}',
+                          bold: true),
+                      PdfBranding.sumRow(
+                          'Closing Balance',
+                          'Rs ${finalBalance.toStringAsFixed(2)}',
+                          big: true,
+                          color: PdfBranding.orange),
+                    ]),
+              ),
+            ),
+          ]));
+
+      pw.Widget accountBox() => PdfBranding.framed(pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            PdfBranding.boxTitle('VENDOR ACCOUNT'),
+            pw.SizedBox(height: 6),
+            PdfBranding.acctRow('Opening Balance',
+                'Rs ${openingBalance.toStringAsFixed(2)}'),
+            PdfBranding.acctRow('Total Debit',
+                'Rs ${totalDebit.toStringAsFixed(2)}'),
+            PdfBranding.acctRow('Total Credit',
+                'Rs ${totalCredit.toStringAsFixed(2)}'),
+            pw.Spacer(),
+            pw.Container(
+              padding:
+              const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: pw.BoxDecoration(
+                  color: PdfBranding.orange,
+                  borderRadius: pw.BorderRadius.circular(4)),
+              child: pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    PdfBranding.txt('Closing Balance',
+                        size: 10, bold: true, color: PdfColors.white),
+                    PdfBranding.txt(
+                        'Rs ${finalBalance.toStringAsFixed(2)}',
+                        size: 11, bold: true, color: PdfColors.white),
+                  ]),
+            ),
+          ]));
+
+      final String dateText =
+      DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now());
+      final String periodText = _selectedDateRange != null
+          ? '${DateFormat('dd MMM yy').format(_selectedDateRange!.start)} – '
+          '${DateFormat('dd MMM yy').format(_selectedDateRange!.end)}'
+          : 'All Transactions';
+
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4,
+          margin: pw.EdgeInsets.zero,
+          header: (ctx) => ctx.pageNumber == 1
+              ? PdfBranding.header()
+              : pw.SizedBox(height: 18),
+          footer: (ctx) => PdfBranding.footer(),
+          build: (ctx) => [
+            PdfBranding.pad(
+                PdfBranding.titleBanner('VENDOR LEDGER'), v: 10),
+            PdfBranding.pad(pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  PdfBranding.infoBox('Date Range', periodText),
+                  PdfBranding.infoBox('Generated', dateText),
+                ])),
+            pw.SizedBox(height: 10),
+            PdfBranding.pad(vendorSection()),
+            pw.SizedBox(height: 12),
+            PdfBranding.pad(transactionsSection()),
+            pw.SizedBox(height: 8),
+            PdfBranding.pad(pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Expanded(child: summaryBox()),
+                  pw.SizedBox(width: 12),
+                  pw.Expanded(child: accountBox()),
+                ])),
+          ],
+        ),
+      );
+
+      return pdf;
+    } catch (e) {
+      debugPrint('Vendor Ledger PDF error: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error generating PDF: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return null;
+    }
+  }
+
+  pw.Widget _purchaseItemsSubTable(
+      List<Map<String, dynamic>> items,
+      Map<String, pw.MemoryImage> nameImgs) {
+    double totalQty = 0.0;
+    double totalWt = 0.0;
+    double totalAmt = 0.0;
+
+    final dataRows = <pw.TableRow>[];
+    for (final it in items) {
+      final q = (it['quantity'] ?? 0).toDouble();
+      final w = (it['weight'] ?? 0).toDouble();
+      final p = (it['price'] ?? it['purchasePrice'] ?? 0).toDouble();
+      final tw = q * w;
+      final ta = tw * p;
+      totalQty += q;
+      totalWt += tw;
+      totalAmt += ta;
+
+      final name = it['itemName']?.toString() ?? '';
+      final desc = it['description']?.toString() ?? '';
+
+      dataRows.add(pw.TableRow(
+        children: [
+          PdfBranding.imgCell(nameImgs[name], name, h: 16),
+          PdfBranding.cell(desc),
+          PdfBranding.cell('Rs ${p.toStringAsFixed(2)}'),
+          PdfBranding.cell('${w.toStringAsFixed(2)} kg'),
+          PdfBranding.cell(q.toStringAsFixed(2)),
+          PdfBranding.cell('${tw.toStringAsFixed(2)} kg'),
+          PdfBranding.cell('Rs ${ta.toStringAsFixed(2)}', bold: true),
+        ],
+      ));
+    }
+
+    return pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text('Purchase Items',
+              style: pw.TextStyle(
+                  fontSize: 9, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 4),
+          pw.Table(
+            border: pw.TableBorder.all(
+                color: PdfBranding.softLine, width: 0.3),
+            columnWidths: const {
+              0: pw.FlexColumnWidth(2.2),
+              1: pw.FlexColumnWidth(1.6),
+              2: pw.FlexColumnWidth(1.0),
+              3: pw.FlexColumnWidth(1.0),
+              4: pw.FlexColumnWidth(0.8),
+              5: pw.FlexColumnWidth(1.0),
+              6: pw.FlexColumnWidth(1.2),
+            },
+            children: [
+              pw.TableRow(
+                decoration: pw.BoxDecoration(color: PdfBranding.navy),
+                children: [
+                  PdfBranding.headCell('Item Name'),
+                  PdfBranding.headCell('Description'),
+                  PdfBranding.headCell('Rate'),
+                  PdfBranding.headCell('Wt/Unit'),
+                  PdfBranding.headCell('Qty'),
+                  PdfBranding.headCell('Total Wt'),
+                  PdfBranding.headCell('Total'),
+                ],
+              ),
+              ...dataRows,
+              pw.TableRow(
+                decoration:
+                pw.BoxDecoration(color: PdfBranding.orange),
+                children: [
+                  PdfBranding.headCell('TOTAL'),
+                  PdfBranding.headCell(''),
+                  PdfBranding.headCell(''),
+                  PdfBranding.headCell(''),
+                  PdfBranding.headCell(totalQty.toStringAsFixed(2)),
+                  PdfBranding.headCell(
+                      '${totalWt.toStringAsFixed(2)} kg'),
+                  PdfBranding.headCell(
+                      'Rs ${totalAmt.toStringAsFixed(2)}'),
+                ],
+              ),
+            ],
+          ),
+        ]);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Print
+  // ═══════════════════════════════════════════════════════════════════
+  Future<void> _printLedger() async {
+    final pdf = await _buildVendorLedgerPdf();
+    if (pdf == null) return;
+    try {
+      if (kIsWeb) {
+        final bytes = await pdf.save();
+        final blob = html.Blob([bytes], 'application/pdf');
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        final anchor =
+        html.document.createElement('a') as html.AnchorElement
+          ..href = url
+          ..style.display = 'none'
+          ..download =
+              'vendor_ledger_${widget.vendorName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf';
+        html.document.body?.children.add(anchor);
+        anchor.click();
+        html.document.body?.children.remove(anchor);
+        html.Url.revokeObjectUrl(url);
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('PDF downloaded successfully!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        await Printing.layoutPdf(
+          onLayout: (format) async => pdf.save(),
+          name:
+          'vendor_ledger_${widget.vendorName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf',
+        );
+      }
+    } catch (e) {
+      debugPrint('Print error: $e');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Data load & helpers
+  // ═══════════════════════════════════════════════════════════════════
+  String? _getBankName(Map<String, dynamic> transaction) {
+    if (transaction['bankName'] != null &&
+        transaction['bankName'].toString().isNotEmpty) {
+      return transaction['bankName'].toString();
+    }
+    String pm =
+        transaction['paymentMethod']?.toString().toLowerCase() ?? '';
+    if (pm == 'cheque' || pm == 'check') {
+      if (transaction['chequeBankName'] != null &&
+          transaction['chequeBankName'].toString().isNotEmpty) {
         return transaction['chequeBankName'].toString();
       }
     }
-
     return null;
   }
 
   String? _getBankLogoPath(String? bankName) {
     if (bankName == null) return null;
-    final key = bankName.toLowerCase();
-    return _bankIconMap[key];
+    return _bankIconMap[bankName.toLowerCase()];
   }
 
   String _getDisplayDate(Map<String, dynamic> transaction) {
-    // For cheque payments, use chequeDate if available
-    final paymentMethod = transaction['method']?.toString().toLowerCase() ?? '';
-    if (paymentMethod == 'cheque' || paymentMethod == 'check') {
-      if (transaction['chequeDate'] != null && transaction['chequeDate'].toString().isNotEmpty) {
+    final pm = transaction['method']?.toString().toLowerCase() ?? '';
+    if (pm == 'cheque' || pm == 'check') {
+      if (transaction['chequeDate'] != null &&
+          transaction['chequeDate'].toString().isNotEmpty) {
         return transaction['chequeDate'].toString();
       }
     }
-
-    // For other transactions, use the regular date
     return transaction['date'] ?? 'Unknown Date';
+  }
+
+  String _getFormattedDate(String dateString, bool isOpeningBalance) {
+    if (isOpeningBalance) return dateString;
+    final parsed = DateTime.tryParse(dateString);
+    if (parsed != null) {
+      return "${parsed.month}/${parsed.day}/${parsed.year % 100}";
+    }
+    return "Unknown Date";
   }
 
   Future<void> _fetchLedgerData() async {
     try {
-      final DatabaseReference vendorRef = FirebaseDatabase.instance.ref('vendors/${widget.vendorId}');
-      final DatabaseReference purchasesRef = FirebaseDatabase.instance.ref('purchases');
-      final DatabaseReference paymentsRef = FirebaseDatabase.instance.ref('vendors/${widget.vendorId}/payments');
+      final vendorRef =
+      FirebaseDatabase.instance.ref('vendors/${widget.vendorId}');
+      final purchasesRef = FirebaseDatabase.instance.ref('purchases');
+      final paymentsRef = FirebaseDatabase.instance
+          .ref('vendors/${widget.vendorId}/payments');
 
-      // Fetch vendor data to get Opening Balance
       final vendorSnapshot = await vendorRef.get();
       double openingBalance = 0.0;
       String openingBalanceDate = "Unknown Date";
 
       if (vendorSnapshot.exists) {
         final vendorData = vendorSnapshot.value as Map<dynamic, dynamic>;
-        openingBalance = (vendorData['openingBalance'] ?? 0.0).toDouble();
-
-        final rawDate = vendorData['openingBalanceDate'] ?? "Unknown Date";
+        openingBalance =
+            (vendorData['openingBalance'] ?? 0.0).toDouble();
+        final rawDate =
+            vendorData['openingBalanceDate'] ?? "Unknown Date";
         final parsedDate = DateTime.tryParse(rawDate);
         openingBalanceDate = parsedDate != null
             ? "${parsedDate.month}/${parsedDate.day}/${parsedDate.year % 100}"
             : "Unknown Date";
       }
-      // Fetch purchases data with details
+
       final purchasesSnapshot = await purchasesRef
           .orderByChild('vendorId')
           .equalTo(widget.vendorId)
           .get();
-
       final List<Map<String, dynamic>> purchases = [];
 
       if (purchasesSnapshot.exists) {
-        final purchasesMap = purchasesSnapshot.value as Map<dynamic, dynamic>;
-
+        final purchasesMap =
+        purchasesSnapshot.value as Map<dynamic, dynamic>;
         purchasesMap.forEach((purchaseKey, purchaseValue) {
           if (purchaseValue is Map) {
             final purchaseData = {
@@ -624,41 +839,48 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
               'debit': 0.0,
               'type': 'credit',
               'purchaseId': purchaseKey,
-              'purchaseNumber': purchaseValue['purchaseNumber'] ?? purchaseKey,
+              'purchaseNumber':
+              purchaseValue['purchaseNumber'] ?? purchaseKey,
               'refNo': purchaseValue['refNo'] ?? '',
               'items': purchaseValue['items'] ?? [],
               'grandTotal': purchaseValue['grandTotal'] ?? 0.0,
             };
             purchases.add(purchaseData);
 
-            // Store purchase items for expansion
             if (purchaseValue['items'] != null) {
               List<Map<String, dynamic>> itemsList = [];
-
               if (purchaseValue['items'] is Map) {
-                // Handle map format
-                final itemsMap = purchaseValue['items'] as Map<dynamic, dynamic>;
+                final itemsMap =
+                purchaseValue['items'] as Map<dynamic, dynamic>;
                 itemsList = itemsMap.entries.map((entry) {
-                  final itemData = entry.value;
+                  final d = entry.value;
                   return {
-                    'itemName': itemData['itemName'] ?? 'Unknown Item',
-                    'description': itemData['description'] ?? '', // Add description
-                    'quantity': (itemData['quantity'] ?? 0).toDouble(),
-                    'weight': (itemData['weight'] ?? itemData['weightPerUnit'] ?? 0).toDouble(),
-                    'price': (itemData['purchasePrice'] ?? itemData['price'] ?? 0.0).toDouble(),
+                    'itemName': d['itemName'] ?? 'Unknown Item',
+                    'description': d['description'] ?? '',
+                    'quantity': (d['quantity'] ?? 0).toDouble(),
+                    'weight': (d['weight'] ?? d['weightPerUnit'] ?? 0)
+                        .toDouble(),
+                    'price': (d['purchasePrice'] ?? d['price'] ?? 0.0)
+                        .toDouble(),
                   };
                 }).toList();
               } else if (purchaseValue['items'] is List) {
-                // Handle list format
-                final itemsListData = purchaseValue['items'] as List<dynamic>;
-                itemsList = itemsListData.map((item) {
+                final list =
+                purchaseValue['items'] as List<dynamic>;
+                itemsList = list.map((item) {
                   if (item is Map) {
                     return {
                       'itemName': item['itemName'] ?? 'Unknown Item',
-                      'description': item['description'] ?? '', // Add description
+                      'description': item['description'] ?? '',
                       'quantity': (item['quantity'] ?? 0).toDouble(),
-                      'weight': (item['weight'] ?? item['weightPerUnit'] ?? 0).toDouble(),
-                      'price': (item['purchasePrice'] ?? item['price'] ?? 0.0).toDouble(),
+                      'weight': (item['weight'] ??
+                          item['weightPerUnit'] ??
+                          0)
+                          .toDouble(),
+                      'price': (item['purchasePrice'] ??
+                          item['price'] ??
+                          0.0)
+                          .toDouble(),
                     };
                   }
                   return {
@@ -670,51 +892,48 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
                   };
                 }).toList();
               }
-
               _purchaseItems[purchaseKey] = itemsList;
             }
           }
         });
       }
 
-      // Fetch payments data
       final paymentsSnapshot = await paymentsRef.get();
       final List<Map<String, dynamic>> payments = [];
-
       if (paymentsSnapshot.exists) {
-        final paymentsMap = paymentsSnapshot.value as Map<dynamic, dynamic>;
-
+        final paymentsMap =
+        paymentsSnapshot.value as Map<dynamic, dynamic>;
         paymentsMap.forEach((paymentKey, paymentValue) {
           if (paymentValue is Map) {
-            final paymentMethod = paymentValue['method'] ??
+            final pm = paymentValue['method'] ??
                 paymentValue['paymentMethod'] ??
                 'Unknown Method';
-
             payments.add({
               'date': paymentValue['date'] ?? 'Unknown Date',
               'chequeDate': paymentValue['chequeDate'],
-              'description': 'Payment via $paymentMethod',
+              'description': 'Payment via $pm',
               'credit': 0.0,
               'description2': paymentValue['description'],
               'debit': (paymentValue['amount'] ?? 0.0).toDouble(),
               'type': 'debit',
-              'method': paymentMethod,
-              'bankName': paymentValue['bankName'] ?? paymentValue['chequeBankName'],
+              'method': pm,
+              'bankName': paymentValue['bankName'] ??
+                  paymentValue['chequeBankName'],
               'paymentId': paymentKey,
             });
           }
         });
       }
 
-      // Combine and sort entries
       final combinedEntries = [...purchases, ...payments];
       combinedEntries.sort((a, b) {
-        final dateA = DateTime.tryParse(_getDisplayDate(a)) ?? DateTime(1970);
-        final dateB = DateTime.tryParse(_getDisplayDate(b)) ?? DateTime(1970);
+        final dateA =
+            DateTime.tryParse(_getDisplayDate(a)) ?? DateTime(1970);
+        final dateB =
+            DateTime.tryParse(_getDisplayDate(b)) ?? DateTime(1970);
         return dateA.compareTo(dateB);
       });
 
-      // Add Opening Balance as the first row
       final openingBalanceEntry = {
         'date': openingBalanceDate,
         'description': 'Opening Balance',
@@ -722,14 +941,11 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
         'debit': 0.0,
         'balance': openingBalance,
       };
-
       combinedEntries.insert(0, openingBalanceEntry);
 
-      // Calculate running balance
       double balance = openingBalance;
       double totalCredit = openingBalance;
       double totalDebit = 0.0;
-
       for (final entry in combinedEntries.skip(1)) {
         balance += entry['credit'] - entry['debit'];
         totalCredit += entry['credit'];
@@ -737,6 +953,7 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
         entry['balance'] = balance;
       }
 
+      if (!mounted) return;
       setState(() {
         _ledgerEntries = combinedEntries;
         _filteredLedgerEntries = combinedEntries;
@@ -746,6 +963,7 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
         _isLoading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error loading ledger: $e')),
       );
@@ -763,470 +981,44 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
     });
   }
 
-  bool _isPurchaseExpanded(String purchaseId) {
-    return _expandedPurchases.contains(purchaseId);
-  }
+  bool _isPurchaseExpanded(String purchaseId) =>
+      _expandedPurchases.contains(purchaseId);
 
   Future<void> _selectDateRange(BuildContext context) async {
-    final DateTimeRange? picked = await showDateRangePicker(
+    final picked = await showDateRangePicker(
       context: context,
       firstDate: DateTime(2000),
       lastDate: DateTime.now(),
     );
-
     if (picked != null) {
       setState(() {
         _selectedDateRange = picked;
-
-        final List<Map<String, dynamic>> filtered = _ledgerEntries.where((entry) {
-          final entryDate = DateTime.tryParse(_getDisplayDate(entry)) ?? DateTime(1970);
-          return entryDate.isAfter(picked.start.subtract(const Duration(days: 1))) &&
-              entryDate.isBefore(picked.end.add(const Duration(days: 1)));
+        final filtered = _ledgerEntries.where((entry) {
+          final entryDate =
+              DateTime.tryParse(_getDisplayDate(entry)) ?? DateTime(1970);
+          return entryDate.isAfter(
+              picked.start.subtract(const Duration(days: 1))) &&
+              entryDate.isBefore(
+                  picked.end.add(const Duration(days: 1)));
         }).toList();
 
-        final openingBalanceIndex = filtered.indexWhere((e) => e['description'] == 'Opening Balance');
-        if (openingBalanceIndex == -1) {
-          final openingBalanceEntry = _ledgerEntries.firstWhere(
+        final idx = filtered.indexWhere(
+                (e) => e['description'] == 'Opening Balance');
+        if (idx == -1) {
+          final ob = _ledgerEntries.firstWhere(
                 (e) => e['description'] == 'Opening Balance',
             orElse: () => {},
           );
-          if (openingBalanceEntry.isNotEmpty) {
-            filtered.insert(0, openingBalanceEntry);
-          }
+          if (ob.isNotEmpty) filtered.insert(0, ob);
         }
-
         _filteredLedgerEntries = filtered;
       });
     }
   }
 
-  Widget _buildPurchaseItems(String purchaseId, Map<String, dynamic> entry) {
-    final purchaseItems = _purchaseItems[purchaseId] ?? [];
-    final refNo = entry['refNo']?.toString() ?? '';
-
-    if (purchaseItems.isEmpty) {
-      return Container(
-        padding: EdgeInsets.all(20),
-        child: Center(
-          child: Text(
-            'No items found for this purchase',
-            style: TextStyle(
-              color: Colors.grey[600],
-              fontStyle: FontStyle.italic,
-            ),
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      padding: EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header for expanded section
-          Container(
-            width: double.infinity,
-            padding: EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Color(0xFFFFF3E0), Color(0xFFFFE0B2)],
-                begin: Alignment.centerLeft,
-                end: Alignment.centerRight,
-              ),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Color(0xFFFFB74D), width: 1),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      padding: EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Color(0xFFE65100),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(Icons.shopping_cart, color: Colors.white, size: 20),
-                    ),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'PURCHASE ITEMS DETAIL',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                          color: Color(0xFFE65100),
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ),
-                    Container(
-                      padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.green[50],
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.green[300]!),
-                      ),
-                      child: Text(
-                        'Total: Rs ${entry['grandTotal']?.toStringAsFixed(2) ?? '0.00'}',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                          color: Colors.green[800],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                if (refNo.isNotEmpty) ...[
-                  SizedBox(height: 8),
-                  Container(
-                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.blue[50],
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: Colors.blue[200]!),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.confirmation_number, size: 16, color: Colors.blue[700]),
-                        SizedBox(width: 6),
-                        Text(
-                          'Reference No: $refNo',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: Colors.blue[800],
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-
-          SizedBox(height: 16),
-
-          // Purchase items table with matching columns
-          Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.grey[300]!),
-            ),
-            child: _buildEnhancedDesktopPurchaseTable(purchaseItems),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildEnhancedDesktopPurchaseTable(List<Map<String, dynamic>> purchaseItems) {
-    // Calculate totals
-    double totalQuantity = purchaseItems.fold(0.0, (sum, item) => sum + (item['quantity'] ?? 0));
-    double totalWeight = purchaseItems.fold(0.0, (sum, item) => sum + ((item['quantity'] ?? 0) * (item['weight'] ?? 0)));
-    double totalAmount = purchaseItems.fold(0.0, (sum, item) {
-      final quantity = item['quantity'] ?? 0.0;
-      final weightPerUnit = item['weight'] ?? 0.0;
-      final price = item['price'] ?? 0.0;
-      return sum + (quantity * weightPerUnit * price);
-    });
-
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Container(
-        constraints: BoxConstraints(minWidth: 1000), // Increased width for all columns
-        child: DataTable(
-          columnSpacing: 20,
-          dataRowHeight: 50,
-          headingRowHeight: 48,
-          headingRowColor: MaterialStateProperty.all(Color(0xFFF5F5F5)),
-          border: TableBorder.all(
-            color: Colors.grey[300]!,
-            borderRadius: BorderRadius.circular(4),
-          ),
-          headingTextStyle: TextStyle(
-            fontWeight: FontWeight.bold,
-            color: Color(0xFFE65100),
-            fontSize: 14,
-            letterSpacing: 0.3,
-          ),
-          dataTextStyle: TextStyle(
-            fontSize: 13,
-            color: Colors.black87,
-          ),
-          columns: [
-            DataColumn(
-              label: Container(
-                width: 150,
-                child: Text(
-                  'Size (Item Name)',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ),
-            ),
-            DataColumn(
-              label: Container(
-                width: 200,
-                child: Text(
-                  'Description',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ),
-            ),
-            DataColumn(
-              label: Text('Rate'),
-              numeric: true,
-            ),
-            DataColumn(
-              label: Text('Wt/Unit'),
-              numeric: true,
-            ),
-            DataColumn(
-              label: Text('Qty'),
-              numeric: true,
-            ),
-            DataColumn(
-              label: Text('Total Weight'),
-              numeric: true,
-            ),
-            DataColumn(
-              label: Text('Total Amount'),
-              numeric: true,
-            ),
-          ],
-          rows: [
-            // Data rows
-            ...purchaseItems.map((item) {
-              final quantity = item['quantity'] ?? 0.0;
-              final weightPerUnit = item['weight'] ?? 0.0;
-              final price = item['price'] ?? 0.0;
-              final totalWeight = quantity * weightPerUnit;
-              final totalAmount = totalWeight * price;
-
-              return DataRow(
-                cells: [
-                  DataCell(
-                    Container(
-                      width: 150,
-                      child: Text(
-                        item['itemName']?.toString() ?? '-',
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 2,
-                        style: TextStyle(fontWeight: FontWeight.w500),
-                      ),
-                    ),
-                  ),
-                  DataCell(
-                    Container(
-                      width: 200,
-                      child: Text(
-                        item['description']?.toString() ?? '-',
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 2,
-                        style: TextStyle(color: Colors.grey[700]),
-                      ),
-                    ),
-                  ),
-                  DataCell(
-                    Text(
-                      'Rs ${price.toStringAsFixed(2)}',
-                      style: TextStyle(
-                        color: Colors.grey[700],
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                  DataCell(
-                    Container(
-                      padding: EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.purple[50],
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        '${weightPerUnit.toStringAsFixed(2)} kg',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: Colors.purple[800],
-                        ),
-                      ),
-                    ),
-                  ),
-                  DataCell(
-                    Container(
-                      padding: EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.blue[50],
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        quantity.toStringAsFixed(2),
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: Colors.blue[800],
-                        ),
-                      ),
-                    ),
-                  ),
-                  DataCell(
-                    Container(
-                      padding: EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.orange[50],
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        '${totalWeight.toStringAsFixed(2)} kg',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: Colors.orange[800],
-                        ),
-                      ),
-                    ),
-                  ),
-                  DataCell(
-                    Container(
-                      padding: EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.green[50],
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        'Rs ${totalAmount.toStringAsFixed(2)}',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.green[800],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              );
-            }).toList(),
-
-            // Total row
-            DataRow(
-              color: MaterialStateProperty.all(Colors.grey[100]),
-              cells: [
-                DataCell(
-                  Container(
-                    width: 150,
-                    child: Text(
-                      'TOTAL',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFFE65100),
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                ),
-                DataCell(
-                  Container(
-                    width: 200,
-                    child: Text('-'),
-                  ),
-                ),
-                DataCell(
-                  Text('-'),
-                ),
-                DataCell(
-                  Container(
-                    padding: EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.purple[100],
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.purple[300]!),
-                    ),
-                    child: Text(
-                      '-',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.purple[900],
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                ),
-                DataCell(
-                  Container(
-                    padding: EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.blue[100],
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.blue[300]!),
-                    ),
-                    child: Text(
-                      totalQuantity.toStringAsFixed(2),
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.blue[900],
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                ),
-                DataCell(
-                  Container(
-                    padding: EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.orange[100],
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.orange[300]!),
-                    ),
-                    child: Text(
-                      totalWeight.toStringAsFixed(2),
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.orange[900],
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                ),
-                DataCell(
-                  Container(
-                    padding: EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.green[100],
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.green[300]!),
-                    ),
-                    child: Text(
-                      'Rs ${totalAmount.toStringAsFixed(2)}',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.green[900],
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _getFormattedDate(String dateString, bool isOpeningBalance) {
-    if (isOpeningBalance) {
-      return dateString;
-    }
-
-    final DateTime? parsedDate = DateTime.tryParse(dateString);
-    if (parsedDate != null) {
-      return "${parsedDate.month}/${parsedDate.day}/${parsedDate.year % 100}";
-    }
-    return "Unknown Date";
-  }
-
+  // ═══════════════════════════════════════════════════════════════════
+  // UI (unchanged look, new AppBar actions)
+  // ═══════════════════════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     final isMobile = MediaQuery.of(context).size.width < 600;
@@ -1252,6 +1044,10 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
             icon: const Icon(Icons.print, color: Colors.white),
             onPressed: _printLedger,
           ),
+          IconButton(
+            icon: const Icon(Icons.share, color: Colors.white),
+            onPressed: _shareWhatsApp,
+          ),
         ],
       ),
       body: _isLoading
@@ -1260,7 +1056,9 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
         children: [
           _buildSummaryCards(),
           Expanded(
-            child: isMobile ? _buildMobileLedgerView() : _buildDesktopLedgerView(),
+            child: isMobile
+                ? _buildMobileLedgerView()
+                : _buildDesktopLedgerView(),
           ),
         ],
       ),
@@ -1269,170 +1067,235 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
 
   Widget _buildMobileLedgerView() {
     const double fontSize = 10.0;
-
     return ListView(
       padding: const EdgeInsets.all(8.0),
       children: [
-        // Table header
         Container(
           color: Colors.blue[100],
-          padding: const EdgeInsets.symmetric(vertical: 6.0, horizontal: 4.0),
-          child: Row(
-            children: [
-              Expanded(
+          padding:
+          const EdgeInsets.symmetric(vertical: 6.0, horizontal: 4.0),
+          child: Row(children: [
+            Expanded(
                 flex: 2,
                 child: Container(
-                  decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                  child: const Text('Date', style: TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize)),
-                ),
-              ),
-              Expanded(
+                  decoration: const BoxDecoration(
+                      border: Border(
+                          right: BorderSide(
+                              color: Colors.black, width: 1))),
+                  child: const Text('Date',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: fontSize)),
+                )),
+            Expanded(
                 flex: 2,
                 child: Container(
-                  decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                  child: const Text('Description', style: TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize)),
-                ),
-              ),
-              Expanded(
+                  decoration: const BoxDecoration(
+                      border: Border(
+                          right: BorderSide(
+                              color: Colors.black, width: 1))),
+                  child: const Text('Description',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: fontSize)),
+                )),
+            Expanded(
                 flex: 2,
                 child: Container(
-                  decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                  child: const Text('Credit', style: TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize), textAlign: TextAlign.right),
-                ),
-              ),
-              Expanded(
+                  decoration: const BoxDecoration(
+                      border: Border(
+                          right: BorderSide(
+                              color: Colors.black, width: 1))),
+                  child: const Text('Credit',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: fontSize),
+                      textAlign: TextAlign.right),
+                )),
+            Expanded(
                 flex: 2,
                 child: Container(
-                  decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                  child: const Text('Debit', style: TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize), textAlign: TextAlign.right),
-                ),
-              ),
-              const Expanded(
+                  decoration: const BoxDecoration(
+                      border: Border(
+                          right: BorderSide(
+                              color: Colors.black, width: 1))),
+                  child: const Text('Debit',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: fontSize),
+                      textAlign: TextAlign.right),
+                )),
+            const Expanded(
                 flex: 2,
-                child: Text('Balance', style: TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize), textAlign: TextAlign.right),
-              ),
-            ],
-          ),
+                child: Text('Balance',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: fontSize),
+                    textAlign: TextAlign.right)),
+          ]),
         ),
-
-        // Table rows with purchase expansion
         ..._filteredLedgerEntries.expand((entry) {
-          final List<Widget> rows = [];
-          final isOpeningBalance = entry['description'] == 'Opening Balance';
+          final rows = <Widget>[];
+          final isOpening = entry['description'] == 'Opening Balance';
           final isPurchase = entry['description'] == 'Purchase';
-          final dateText = isOpeningBalance
+          final dateText = isOpening
               ? entry['date']
               : _getFormattedDate(_getDisplayDate(entry), false);
 
-          // Main row
-          rows.add(
-            Container(
-              color: isOpeningBalance ? Colors.yellow[100] : Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 6.0, horizontal: 4.0),
-              child: Row(
-                children: [
-                  Expanded(
-                    flex: 2,
-                    child: Container(
-                      decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                      child: Text(dateText, style: TextStyle(fontWeight: isOpeningBalance ? FontWeight.bold : FontWeight.normal, fontSize: fontSize)),
-                    ),
-                  ),
-                  Expanded(
-                    flex: 2,
-                    child: Container(
-                      decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                      child: Row(
-                        children: [
-                          if (isPurchase)
-                            IconButton(
-                              icon: Icon(
-                                _isPurchaseExpanded(entry['purchaseId']) ? Icons.expand_less : Icons.expand_more,
-                                size: 16,
-                              ),
-                              onPressed: () => _togglePurchaseExpansion(entry['purchaseId']),
-                            ),
-                          Expanded(
-                            child: Text(
-                              entry['description'],
-                              style: TextStyle(fontWeight: isOpeningBalance ? FontWeight.bold : FontWeight.normal, fontSize: fontSize),
-                            ),
+          rows.add(Container(
+            color: isOpening ? Colors.yellow[100] : Colors.white,
+            padding: const EdgeInsets.symmetric(
+                vertical: 6.0, horizontal: 4.0),
+            child: Row(children: [
+              Expanded(
+                  flex: 2,
+                  child: Container(
+                    decoration: const BoxDecoration(
+                        border: Border(
+                            right: BorderSide(
+                                color: Colors.black, width: 1))),
+                    child: Text(dateText,
+                        style: TextStyle(
+                            fontWeight: isOpening
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                            fontSize: fontSize)),
+                  )),
+              Expanded(
+                  flex: 2,
+                  child: Container(
+                    decoration: const BoxDecoration(
+                        border: Border(
+                            right: BorderSide(
+                                color: Colors.black, width: 1))),
+                    child: Row(children: [
+                      if (isPurchase)
+                        IconButton(
+                          icon: Icon(
+                            _isPurchaseExpanded(entry['purchaseId'])
+                                ? Icons.expand_less
+                                : Icons.expand_more,
+                            size: 16,
                           ),
-                        ],
+                          onPressed: () => _togglePurchaseExpansion(
+                              entry['purchaseId']),
+                        ),
+                      Expanded(
+                        child: Text(entry['description'],
+                            style: TextStyle(
+                                fontWeight: isOpening
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                fontSize: fontSize)),
                       ),
-                    ),
-                  ),
-                  Expanded(
-                    flex: 2,
-                    child: Container(
-                      decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                      child: Text(entry['credit'].toStringAsFixed(2), textAlign: TextAlign.right, style: const TextStyle(fontSize: fontSize)),
-                    ),
-                  ),
-                  Expanded(
-                    flex: 2,
-                    child: Container(
-                      decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                      child: Text(entry['debit'].toStringAsFixed(2), textAlign: TextAlign.right, style: const TextStyle(fontSize: fontSize)),
-                    ),
-                  ),
-                  Expanded(
-                    flex: 2,
-                    child: Text(entry['balance'].toStringAsFixed(2), textAlign: TextAlign.right, style: const TextStyle(fontSize: fontSize)),
-                  ),
-                ],
+                    ]),
+                  )),
+              Expanded(
+                  flex: 2,
+                  child: Container(
+                    decoration: const BoxDecoration(
+                        border: Border(
+                            right: BorderSide(
+                                color: Colors.black, width: 1))),
+                    child: Text(
+                        (entry['credit'] as num)
+                            .toStringAsFixed(2),
+                        textAlign: TextAlign.right,
+                        style:
+                        const TextStyle(fontSize: fontSize)),
+                  )),
+              Expanded(
+                  flex: 2,
+                  child: Container(
+                    decoration: const BoxDecoration(
+                        border: Border(
+                            right: BorderSide(
+                                color: Colors.black, width: 1))),
+                    child: Text(
+                        (entry['debit'] as num).toStringAsFixed(2),
+                        textAlign: TextAlign.right,
+                        style:
+                        const TextStyle(fontSize: fontSize)),
+                  )),
+              Expanded(
+                flex: 2,
+                child: Text(
+                    (entry['balance'] as num)
+                        .toStringAsFixed(2),
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(fontSize: fontSize)),
               ),
-            ),
-          );
+            ]),
+          ));
 
-          // Purchase details if expanded
           if (isPurchase && _isPurchaseExpanded(entry['purchaseId'])) {
-            rows.add(_buildPurchaseItems(entry['purchaseId'], entry));
+            rows.add(_buildPurchaseItems(
+                entry['purchaseId'], entry));
           }
-
           return rows;
         }).toList(),
-
-        // Total row
         Container(
           color: Colors.grey[300],
-          padding: const EdgeInsets.symmetric(vertical: 6.0, horizontal: 4.0),
-          child: Row(
-            children: [
-              Expanded(
+          padding:
+          const EdgeInsets.symmetric(vertical: 6.0, horizontal: 4.0),
+          child: Row(children: [
+            Expanded(
                 flex: 2,
                 child: Container(
-                  decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                  child: const Text('', style: TextStyle(fontSize: fontSize)),
-                ),
-              ),
-              Expanded(
+                  decoration: const BoxDecoration(
+                      border: Border(
+                          right: BorderSide(
+                              color: Colors.black, width: 1))),
+                  child: const Text('',
+                      style: TextStyle(fontSize: fontSize)),
+                )),
+            Expanded(
                 flex: 2,
                 child: Container(
-                  decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                  child: const Text('Totals', style: TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize)),
-                ),
-              ),
-              Expanded(
+                  decoration: const BoxDecoration(
+                      border: Border(
+                          right: BorderSide(
+                              color: Colors.black, width: 1))),
+                  child: const Text('Totals',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: fontSize)),
+                )),
+            Expanded(
                 flex: 2,
                 child: Container(
-                  decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                  child: Text(_totalCredit.toStringAsFixed(2), textAlign: TextAlign.right, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize)),
-                ),
-              ),
-              Expanded(
+                  decoration: const BoxDecoration(
+                      border: Border(
+                          right: BorderSide(
+                              color: Colors.black, width: 1))),
+                  child: Text(_totalCredit.toStringAsFixed(2),
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: fontSize)),
+                )),
+            Expanded(
                 flex: 2,
                 child: Container(
-                  decoration: const BoxDecoration(border: Border(right: BorderSide(color: Colors.black, width: 1))),
-                  child: Text(_totalDebit.toStringAsFixed(2), textAlign: TextAlign.right, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize)),
-                ),
-              ),
-              Expanded(
-                flex: 2,
-                child: Text(_currentBalance.toStringAsFixed(2), textAlign: TextAlign.right, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: fontSize)),
-              ),
-            ],
-          ),
+                  decoration: const BoxDecoration(
+                      border: Border(
+                          right: BorderSide(
+                              color: Colors.black, width: 1))),
+                  child: Text(_totalDebit.toStringAsFixed(2),
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: fontSize)),
+                )),
+            Expanded(
+              flex: 2,
+              child: Text(_currentBalance.toStringAsFixed(2),
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: fontSize)),
+            ),
+          ]),
         ),
       ],
     );
@@ -1441,154 +1304,140 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
   Widget _buildDesktopLedgerView() {
     return Column(
       children: [
-        // Header section
         Container(
           decoration: BoxDecoration(
-            gradient: LinearGradient(
+            gradient: const LinearGradient(
               colors: [Color(0xFFFF8A65), Color(0xFFFFB74D)],
               begin: Alignment.centerLeft,
               end: Alignment.centerRight,
             ),
-            borderRadius: BorderRadius.only(
+            borderRadius: const BorderRadius.only(
               topLeft: Radius.circular(8),
               topRight: Radius.circular(8),
             ),
-            boxShadow: [
+            boxShadow: const [
               BoxShadow(
-                color: Colors.black12,
-                blurRadius: 4,
-                offset: Offset(0, 2),
-              ),
+                  color: Colors.black12,
+                  blurRadius: 4,
+                  offset: Offset(0, 2)),
             ],
           ),
-          child: Row(
-            children: [
-              _buildEnhancedHeaderCell('Date', 1.2),
-              _buildEnhancedHeaderCell('Transaction', 2.0),
-              _buildEnhancedHeaderCell('Description', 2.5),
-              _buildEnhancedHeaderCell('Method', 1.2),
-              _buildEnhancedHeaderCell('Bank', 1.8),
-              _buildEnhancedHeaderCell('Qty', 0.8),
-              _buildEnhancedHeaderCell('Weight', 0.8),
-              _buildEnhancedHeaderCell('Debit (Rs)', 1.3),
-              _buildEnhancedHeaderCell('Credit (Rs)', 1.3),
-              _buildEnhancedHeaderCell('Balance (Rs)', 1.5),
-            ],
-          ),
+          child: Row(children: [
+            _buildEnhancedHeaderCell('Date', 1.2),
+            _buildEnhancedHeaderCell('Transaction', 2.0),
+            _buildEnhancedHeaderCell('Description', 2.5),
+            _buildEnhancedHeaderCell('Method', 1.2),
+            _buildEnhancedHeaderCell('Bank', 1.8),
+            _buildEnhancedHeaderCell('Qty', 0.8),
+            _buildEnhancedHeaderCell('Weight', 0.8),
+            _buildEnhancedHeaderCell('Debit (Rs)', 1.3),
+            _buildEnhancedHeaderCell('Credit (Rs)', 1.3),
+            _buildEnhancedHeaderCell('Balance (Rs)', 1.5),
+          ]),
         ),
-
-        // Table Content
         Expanded(
           child: Container(
             decoration: BoxDecoration(
               border: Border.all(color: Colors.grey[300]!),
-              borderRadius: BorderRadius.only(
+              borderRadius: const BorderRadius.only(
                 bottomLeft: Radius.circular(8),
                 bottomRight: Radius.circular(8),
               ),
             ),
             child: SingleChildScrollView(
-              child: Column(
-                children: [
-                  // Data Rows
-                  ..._filteredLedgerEntries.asMap().entries.expand((entryWithIndex) {
+              child: Column(children: [
+                ..._filteredLedgerEntries.asMap().entries.expand(
+                      (entryWithIndex) {
                     final index = entryWithIndex.key;
                     final entry = entryWithIndex.value;
-                    final List<Widget> rows = [];
-                    final isOpeningBalance = entry['description'] == 'Opening Balance';
-                    final isPurchase = entry['description'] == 'Purchase';
-                    final dateText = isOpeningBalance
-                        ? entry['date']
-                        : _getFormattedDate(_getDisplayDate(entry), false);
+                    final rows = <Widget>[];
+                    final isOpening =
+                        entry['description'] == 'Opening Balance';
+                    final isPurchase =
+                        entry['description'] == 'Purchase';
+                    final isEvenRow = index % 2 == 0;
 
-                    // Alternate row colors for better readability
-                    final bool isEvenRow = index % 2 == 0;
+                    rows.add(_buildEnhancedTransactionRow(
+                        entry,
+                        isOpening,
+                        isPurchase,
+                        isEvenRow
+                            ? Colors.white
+                            : Colors.grey[50]!));
 
-                    // Main row
-                    rows.add(
-                      _buildEnhancedTransactionRow(
-                          entry,
-                          isOpeningBalance,
-                          isPurchase,
-                          isEvenRow ? Colors.white : Colors.grey[50]!
-                      ),
-                    );
-
-                    // Purchase details if expanded
-                    if (isPurchase && _isPurchaseExpanded(entry['purchaseId'])) {
-                      rows.add(
-                        Container(
-                          width: double.infinity,
-                          decoration: BoxDecoration(
-                            color: isEvenRow ? Colors.orange[25] : Colors.orange[50],
-                            border: Border(
-                              bottom: BorderSide(color: Colors.grey[300]!, width: 1),
-                            ),
-                          ),
-                          child: _buildPurchaseItems(entry['purchaseId'], entry),
+                    if (isPurchase &&
+                        _isPurchaseExpanded(entry['purchaseId'])) {
+                      rows.add(Container(
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: isEvenRow
+                              ? Colors.orange[25]
+                              : Colors.orange[50],
+                          border: Border(
+                              bottom: BorderSide(
+                                  color: Colors.grey[300]!,
+                                  width: 1)),
                         ),
-                      );
+                        child: _buildPurchaseItems(
+                            entry['purchaseId'], entry),
+                      ));
                     }
-
                     return rows;
-                  }).toList(),
-
-                  // Enhanced Total Row
-                  Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [Colors.grey[100]!, Colors.grey[200]!],
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
-                      ),
-                      border: Border(
-                        top: BorderSide(color: Colors.grey[400]!, width: 2),
-                      ),
+                  },
+                ).toList(),
+                Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.grey[100]!, Colors.grey[200]!],
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
                     ),
-                    child: Row(
-                      children: [
-                        _buildEnhancedDataCell(
-                          'GRAND TOTAL',
-                          1.2,
-                          false,
-                          fontWeight: FontWeight.bold,
-                          backgroundColor: Colors.transparent,
-                        ),
-                        _buildEnhancedDataCell('', 2.0, false, backgroundColor: Colors.transparent),
-                        _buildEnhancedDataCell('', 2.5, false, backgroundColor: Colors.transparent),
-                        _buildEnhancedDataCell('', 1.2, false, backgroundColor: Colors.transparent),
-                        _buildEnhancedDataCell('', 1.8, false, backgroundColor: Colors.transparent),
-                        _buildEnhancedDataCell('', 0.8, false, backgroundColor: Colors.transparent),
-                        _buildEnhancedDataCell('', 0.8, false, backgroundColor: Colors.transparent),
-                        _buildEnhancedDataCell(
-                          'Rs ${_totalDebit.toStringAsFixed(2)}',
-                          1.3,
-                          false,
-                          fontWeight: FontWeight.bold,
-                          textColor: Colors.red[800],
-                          backgroundColor: Colors.transparent,
-                        ),
-                        _buildEnhancedDataCell(
-                          'Rs ${_totalCredit.toStringAsFixed(2)}',
-                          1.3,
-                          false,
-                          fontWeight: FontWeight.bold,
-                          textColor: Colors.green[800],
-                          backgroundColor: Colors.transparent,
-                        ),
-                        _buildEnhancedDataCell(
-                          'Rs ${_currentBalance.toStringAsFixed(2)}',
-                          1.5,
-                          false,
-                          fontWeight: FontWeight.bold,
-                          textColor: _currentBalance >= 0 ? Colors.blue[800] : Colors.orange[800],
-                          backgroundColor: Colors.transparent,
-                        ),
-                      ],
-                    ),
+                    border: Border(
+                        top: BorderSide(
+                            color: Colors.grey[400]!, width: 2)),
                   ),
-                ],
-              ),
+                  child: Row(children: [
+                    _buildEnhancedDataCell('GRAND TOTAL', 1.2, false,
+                        fontWeight: FontWeight.bold,
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell('', 2.0, false,
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell('', 2.5, false,
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell('', 1.2, false,
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell('', 1.8, false,
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell('', 0.8, false,
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell('', 0.8, false,
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell(
+                        'Rs ${_totalDebit.toStringAsFixed(2)}',
+                        1.3,
+                        false,
+                        fontWeight: FontWeight.bold,
+                        textColor: Colors.red[800],
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell(
+                        'Rs ${_totalCredit.toStringAsFixed(2)}',
+                        1.3,
+                        false,
+                        fontWeight: FontWeight.bold,
+                        textColor: Colors.green[800],
+                        backgroundColor: Colors.transparent),
+                    _buildEnhancedDataCell(
+                        'Rs ${_currentBalance.toStringAsFixed(2)}',
+                        1.5,
+                        false,
+                        fontWeight: FontWeight.bold,
+                        textColor: _currentBalance >= 0
+                            ? Colors.blue[800]
+                            : Colors.orange[800],
+                        backgroundColor: Colors.transparent),
+                  ]),
+                ),
+              ]),
             ),
           ),
         ),
@@ -1596,25 +1445,335 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
     );
   }
 
+  Widget _buildPurchaseItems(
+      String purchaseId, Map<String, dynamic> entry) {
+    final purchaseItems = _purchaseItems[purchaseId] ?? [];
+    final refNo = entry['refNo']?.toString() ?? '';
+
+    if (purchaseItems.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(20),
+        child: Center(
+          child: Text('No items found for this purchase',
+              style: TextStyle(
+                  color: Colors.grey[600],
+                  fontStyle: FontStyle.italic)),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFFFFF3E0), Color(0xFFFFE0B2)],
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+              ),
+              borderRadius: BorderRadius.circular(8),
+              border:
+              Border.all(color: const Color(0xFFFFB74D), width: 1),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFE65100),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.shopping_cart,
+                        color: Colors.white, size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text('PURCHASE ITEMS DETAIL',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: Color(0xFFE65100),
+                            letterSpacing: 0.5)),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.green[50],
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.green[300]!),
+                    ),
+                    child: Text(
+                        'Total: Rs ${entry['grandTotal']?.toStringAsFixed(2) ?? '0.00'}',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            color: Colors.green[800])),
+                  ),
+                ]),
+                if (refNo.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.blue[50],
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.blue[200]!),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.confirmation_number,
+                            size: 16, color: Colors.blue[700]),
+                        const SizedBox(width: 6),
+                        Text('Reference No: $refNo',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: Colors.blue[800],
+                                fontSize: 13)),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.grey[300]!),
+            ),
+            child: _buildEnhancedDesktopPurchaseTable(purchaseItems),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEnhancedDesktopPurchaseTable(
+      List<Map<String, dynamic>> purchaseItems) {
+    double totalQuantity = purchaseItems.fold(
+        0.0, (s, it) => s + ((it['quantity'] ?? 0) as num).toDouble());
+    double totalWeight = purchaseItems.fold(
+        0.0,
+            (s, it) =>
+        s +
+            ((it['quantity'] ?? 0) as num).toDouble() *
+                ((it['weight'] ?? 0) as num).toDouble());
+    double totalAmount = purchaseItems.fold(0.0, (s, it) {
+      final q = ((it['quantity'] ?? 0) as num).toDouble();
+      final w = ((it['weight'] ?? 0) as num).toDouble();
+      final p = ((it['price'] ?? 0) as num).toDouble();
+      return s + q * w * p;
+    });
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 1000),
+        child: DataTable(
+          columnSpacing: 20,
+          dataRowHeight: 50,
+          headingRowHeight: 48,
+          headingRowColor:
+          MaterialStateProperty.all(const Color(0xFFF5F5F5)),
+          border: TableBorder.all(
+              color: Colors.grey[300]!,
+              borderRadius: BorderRadius.circular(4)),
+          headingTextStyle: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Color(0xFFE65100),
+              fontSize: 14,
+              letterSpacing: 0.3),
+          dataTextStyle:
+          const TextStyle(fontSize: 13, color: Colors.black87),
+          columns: const [
+            DataColumn(
+                label: SizedBox(
+                    width: 150,
+                    child: Text('Size (Item Name)',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold)))),
+            DataColumn(
+                label: SizedBox(
+                    width: 200,
+                    child: Text('Description',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold)))),
+            DataColumn(label: Text('Rate'), numeric: true),
+            DataColumn(label: Text('Wt/Unit'), numeric: true),
+            DataColumn(label: Text('Qty'), numeric: true),
+            DataColumn(label: Text('Total Weight'), numeric: true),
+            DataColumn(label: Text('Total Amount'), numeric: true),
+          ],
+          rows: [
+            ...purchaseItems.map((item) {
+              final q = ((item['quantity'] ?? 0) as num).toDouble();
+              final w = ((item['weight'] ?? 0) as num).toDouble();
+              final p = ((item['price'] ?? 0) as num).toDouble();
+              final tw = q * w;
+              final ta = tw * p;
+              return DataRow(cells: [
+                DataCell(SizedBox(
+                    width: 150,
+                    child: Text(
+                        item['itemName']?.toString() ?? '-',
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 2,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w500)))),
+                DataCell(SizedBox(
+                    width: 200,
+                    child: Text(
+                        item['description']?.toString() ?? '-',
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 2,
+                        style:
+                        TextStyle(color: Colors.grey[700])))),
+                DataCell(Text('Rs ${p.toStringAsFixed(2)}',
+                    style: TextStyle(
+                        color: Colors.grey[700],
+                        fontWeight: FontWeight.w500))),
+                DataCell(Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.purple[50],
+                      borderRadius: BorderRadius.circular(4)),
+                  child: Text('${w.toStringAsFixed(2)} kg',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: Colors.purple[800])),
+                )),
+                DataCell(Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.blue[50],
+                      borderRadius: BorderRadius.circular(4)),
+                  child: Text(q.toStringAsFixed(2),
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: Colors.blue[800])),
+                )),
+                DataCell(Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.orange[50],
+                      borderRadius: BorderRadius.circular(4)),
+                  child: Text('${tw.toStringAsFixed(2)} kg',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: Colors.orange[800])),
+                )),
+                DataCell(Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.green[50],
+                      borderRadius: BorderRadius.circular(4)),
+                  child: Text('Rs ${ta.toStringAsFixed(2)}',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.green[800])),
+                )),
+              ]);
+            }).toList(),
+            DataRow(
+              color: MaterialStateProperty.all(Colors.grey[100]),
+              cells: [
+                const DataCell(SizedBox(
+                    width: 150,
+                    child: Text('TOTAL',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFFE65100),
+                            fontSize: 13)))),
+                const DataCell(SizedBox(
+                    width: 200, child: Text('-'))),
+                const DataCell(Text('-')),
+                DataCell(Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.purple[100],
+                      borderRadius: BorderRadius.circular(4),
+                      border:
+                      Border.all(color: Colors.purple[300]!)),
+                  child: Text('-',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.purple[900],
+                          fontSize: 13)),
+                )),
+                DataCell(Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.blue[100],
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.blue[300]!)),
+                  child: Text(totalQuantity.toStringAsFixed(2),
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue[900],
+                          fontSize: 13)),
+                )),
+                DataCell(Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.orange[100],
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.orange[300]!)),
+                  child: Text(totalWeight.toStringAsFixed(2),
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange[900],
+                          fontSize: 13)),
+                )),
+                DataCell(Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.green[100],
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.green[300]!)),
+                  child: Text('Rs ${totalAmount.toStringAsFixed(2)}',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.green[900],
+                          fontSize: 13)),
+                )),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildEnhancedHeaderCell(String text, double flexValue) {
     return Expanded(
       flex: (flexValue * 10).round(),
       child: Container(
-        padding: EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+        padding:
+        const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
         decoration: BoxDecoration(
-          border: Border(right: BorderSide(color: Colors.white.withOpacity(0.3))),
+          border: Border(
+              right: BorderSide(
+                  color: Colors.white.withOpacity(0.3))),
         ),
-        child: Text(
-          text,
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-            fontSize: 13,
-            letterSpacing: 0.5,
-          ),
-          textAlign: TextAlign.center,
-          overflow: TextOverflow.ellipsis,
-        ),
+        child: Text(text,
+            style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+                fontSize: 13,
+                letterSpacing: 0.5),
+            textAlign: TextAlign.center,
+            overflow: TextOverflow.ellipsis),
       ),
     );
   }
@@ -1624,8 +1783,7 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
       bool isOpeningBalance,
       bool isPurchase,
       Color backgroundColor,
-      )
-  {
+      ) {
     final dateText = isOpeningBalance
         ? entry['date']
         : _getFormattedDate(_getDisplayDate(entry), false);
@@ -1634,169 +1792,179 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
     final bankLogoPath = _getBankLogoPath(bankName);
     final isExpanded = isPurchase && _isPurchaseExpanded(entry['purchaseId']);
 
-    // Calculate quantity and weight for purchases
     double quantity = 0.0;
     double weight = 0.0;
     if (isPurchase && _isPurchaseExpanded(entry['purchaseId'])) {
-      final purchaseItems = _purchaseItems[entry['purchaseId']] ?? [];
-      quantity = purchaseItems.fold(0.0, (sum, item) => sum + (item['quantity'] ?? 0));
-      weight = purchaseItems.fold(0.0, (sum, item) => sum + ((item['quantity'] ?? 0) * (item['weight'] ?? 0)));
+      final items = _purchaseItems[entry['purchaseId']] ?? [];
+      quantity = items.fold(
+          0.0, (s, it) => s + ((it['quantity'] ?? 0) as num).toDouble());
+      weight = items.fold(
+          0.0,
+              (s, it) =>
+          s +
+              ((it['quantity'] ?? 0) as num).toDouble() *
+                  ((it['weight'] ?? 0) as num).toDouble());
     }
 
+    final credit = (entry['credit'] ?? 0) as num;
+    final debit = (entry['debit'] ?? 0) as num;
+    final balance = (entry['balance'] ?? 0) as num;
+
     return GestureDetector(
-      onTap: isPurchase ? () {
-        _togglePurchaseExpansion(entry['purchaseId']);
-      } : null,
+      onTap: isPurchase
+          ? () => _togglePurchaseExpansion(entry['purchaseId'])
+          : null,
       child: MouseRegion(
-        cursor: isPurchase ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        cursor: isPurchase
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.basic,
         child: Container(
           decoration: BoxDecoration(
             color: isOpeningBalance
                 ? Colors.amber[50]
                 : (isPurchase && isExpanded
-                ? Color(0xFFFFB74D).withOpacity(0.15)
+                ? const Color(0xFFFFB74D).withOpacity(0.15)
                 : backgroundColor),
             border: Border(
-              bottom: BorderSide(color: Colors.grey[200]!),
-            ),
+                bottom: BorderSide(color: Colors.grey[200]!)),
           ),
-          child: Row(
-            children: [
-              _buildEnhancedDataCell(dateText, 1.2, false,
-                fontWeight: isOpeningBalance ? FontWeight.bold : FontWeight.normal,
-                textColor: isOpeningBalance ? Colors.orange[800] : Colors.black87,
-              ),
-              _buildEnhancedDataCell(
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  mainAxisAlignment: MainAxisAlignment.start,
-                  children: [
-                    if (isPurchase)
-                      Container(
-                        margin: EdgeInsets.only(right: 8),
-                        child: IconButton(
-                          icon: Icon(
-                            isExpanded ? Icons.expand_less : Icons.expand_more,
+          child: Row(children: [
+            _buildEnhancedDataCell(dateText, 1.2, false,
+                fontWeight: isOpeningBalance
+                    ? FontWeight.bold
+                    : FontWeight.normal,
+                textColor: isOpeningBalance
+                    ? Colors.orange[800]
+                    : Colors.black87),
+            _buildEnhancedDataCell(
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.start,
+                children: [
+                  if (isPurchase)
+                    Container(
+                      margin: const EdgeInsets.only(right: 8),
+                      child: IconButton(
+                        icon: Icon(
+                            isExpanded
+                                ? Icons.expand_less
+                                : Icons.expand_more,
                             size: 18,
-                            color: Color(0xFFE65100),
-                          ),
-                          onPressed: () => _togglePurchaseExpansion(entry['purchaseId']),
-                          padding: EdgeInsets.all(4),
-                          constraints: BoxConstraints(minWidth: 32, minHeight: 32),
-                        ),
+                            color: const Color(0xFFE65100)),
+                        onPressed: () => _togglePurchaseExpansion(
+                            entry['purchaseId']),
+                        padding: const EdgeInsets.all(4),
+                        constraints: const BoxConstraints(
+                            minWidth: 32, minHeight: 32),
                       ),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            entry['description'],
+                    ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(entry['description'],
                             style: TextStyle(
-                              fontWeight: isOpeningBalance ? FontWeight.bold : FontWeight.normal,
-                              color: isOpeningBalance ? Colors.orange[800] : Colors.black87,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          if (isPurchase && entry['refNo'] != null && entry['refNo'].toString().isNotEmpty)
-                            Text(
-                              'Ref: ${entry['refNo']}',
+                                fontWeight: isOpeningBalance
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                color: isOpeningBalance
+                                    ? Colors.orange[800]
+                                    : Colors.black87),
+                            overflow: TextOverflow.ellipsis),
+                        if (isPurchase &&
+                            entry['refNo'] != null &&
+                            entry['refNo'].toString().isNotEmpty)
+                          Text('Ref: ${entry['refNo']}',
                               style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.blue[600],
-                                fontStyle: FontStyle.italic,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                        ],
-                      ),
+                                  fontSize: 11,
+                                  color: Colors.blue[600],
+                                  fontStyle: FontStyle.italic),
+                              overflow: TextOverflow.ellipsis),
+                      ],
                     ),
-                  ],
-                ),
-                2.0,
-                false,
+                  ),
+                ],
               ),
-              _buildEnhancedDataCell(
-                entry['description2'] ?? '-',
-                2.5,
-                false,
-                textColor: Colors.grey[700],
-              ),
-              _buildEnhancedDataCell(
-                entry['method'] ?? '-',
-                1.2,
-                false,
-                textColor: Colors.grey[700],
-              ),
-              _buildEnhancedDataCell(
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    if (bankLogoPath != null) ...[
-                      Container(
-                        width: 28,
-                        height: 28,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.grey[300]!),
-                        ),
-                        child: Image.asset(bankLogoPath),
+              2.0,
+              false,
+            ),
+            _buildEnhancedDataCell(
+                entry['description2'] ?? '-', 2.5, false,
+                textColor: Colors.grey[700]),
+            _buildEnhancedDataCell(entry['method'] ?? '-', 1.2, false,
+                textColor: Colors.grey[700]),
+            _buildEnhancedDataCell(
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (bankLogoPath != null) ...[
+                    Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border:
+                        Border.all(color: Colors.grey[300]!),
                       ),
-                      SizedBox(width: 8),
-                    ],
-                    Flexible(
-                      child: Text(
-                        bankName ?? '-',
+                      child: Image.asset(bankLogoPath),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Flexible(
+                    child: Text(bankName ?? '-',
                         style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey[800],
-                          fontWeight: bankName != null ? FontWeight.w500 : FontWeight.normal,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                1.8,
-                false,
+                            fontSize: 12,
+                            color: Colors.grey[800],
+                            fontWeight: bankName != null
+                                ? FontWeight.w500
+                                : FontWeight.normal),
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                ],
               ),
-              _buildEnhancedDataCell(
+              1.8,
+              false,
+            ),
+            _buildEnhancedDataCell(
                 isPurchase ? quantity.toStringAsFixed(2) : '-',
-                0.8,
-                false,
-                fontWeight: isPurchase ? FontWeight.w600 : FontWeight.normal,
-                textColor: isPurchase ? Colors.blue[700] : Colors.grey[500],
-              ),
-              _buildEnhancedDataCell(
+                0.8, false,
+                fontWeight:
+                isPurchase ? FontWeight.w600 : FontWeight.normal,
+                textColor: isPurchase
+                    ? Colors.blue[700]
+                    : Colors.grey[500]),
+            _buildEnhancedDataCell(
                 isPurchase ? weight.toStringAsFixed(2) : '-',
-                0.8,
-                false,
-                fontWeight: isPurchase ? FontWeight.w600 : FontWeight.normal,
-                textColor: isPurchase ? Colors.orange[700] : Colors.grey[500],
-              ),
-              _buildEnhancedDataCell(
-                entry['debit'] > 0 ? 'Rs ${entry['debit'].toStringAsFixed(2)}' : '-',
-                1.3,
-                false,
-                fontWeight: entry['debit'] > 0 ? FontWeight.w600 : FontWeight.normal,
-                textColor: entry['debit'] > 0 ? Colors.red[700] : Colors.grey[500],
-              ),
-              _buildEnhancedDataCell(
-                entry['credit'] > 0 ? 'Rs ${entry['credit'].toStringAsFixed(2)}' : '-',
-                1.3,
-                false,
-                fontWeight: entry['credit'] > 0 ? FontWeight.w600 : FontWeight.normal,
-                textColor: entry['credit'] > 0 ? Colors.green[700] : Colors.grey[500],
-              ),
-              _buildEnhancedDataCell(
-                'Rs ${entry['balance'].toStringAsFixed(2)}',
-                1.5,
-                false,
+                0.8, false,
+                fontWeight:
+                isPurchase ? FontWeight.w600 : FontWeight.normal,
+                textColor: isPurchase
+                    ? Colors.orange[700]
+                    : Colors.grey[500]),
+            _buildEnhancedDataCell(
+                debit > 0 ? 'Rs ${debit.toStringAsFixed(2)}' : '-',
+                1.3, false,
+                fontWeight:
+                debit > 0 ? FontWeight.w600 : FontWeight.normal,
+                textColor: debit > 0
+                    ? Colors.red[700]
+                    : Colors.grey[500]),
+            _buildEnhancedDataCell(
+                credit > 0 ? 'Rs ${credit.toStringAsFixed(2)}' : '-',
+                1.3, false,
+                fontWeight:
+                credit > 0 ? FontWeight.w600 : FontWeight.normal,
+                textColor: credit > 0
+                    ? Colors.green[700]
+                    : Colors.grey[500]),
+            _buildEnhancedDataCell(
+                'Rs ${balance.toStringAsFixed(2)}', 1.5, false,
                 fontWeight: FontWeight.bold,
-                textColor: entry['balance'] >= 0 ? Colors.blue[700] : Colors.orange[700],
-              ),
-            ],
-          ),
+                textColor: balance >= 0
+                    ? Colors.blue[700]
+                    : Colors.orange[700]),
+          ]),
         ),
       ),
     );
@@ -1809,28 +1977,26 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
         Color? textColor,
         FontWeight? fontWeight,
         Color backgroundColor = Colors.transparent,
-      })
-  {
+      }) {
     return Expanded(
       flex: (flexValue * 10).round(),
       child: Container(
-        padding: EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+        padding:
+        const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
         decoration: BoxDecoration(
           color: backgroundColor,
-          border: Border(right: BorderSide(color: Colors.grey[200]!)),
+          border: Border(
+              right: BorderSide(color: Colors.grey[200]!)),
         ),
         child: content is Widget
             ? content
-            : Text(
-          content.toString(),
-          style: TextStyle(
-            fontSize: 13,
-            color: textColor ?? Colors.black87,
-            fontWeight: fontWeight ?? FontWeight.normal,
-          ),
-          textAlign: TextAlign.center,
-          overflow: TextOverflow.ellipsis,
-        ),
+            : Text(content.toString(),
+            style: TextStyle(
+                fontSize: 13,
+                color: textColor ?? Colors.black87,
+                fontWeight: fontWeight ?? FontWeight.normal),
+            textAlign: TextAlign.center,
+            overflow: TextOverflow.ellipsis),
       ),
     );
   }
@@ -1846,26 +2012,24 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
         alignment: WrapAlignment.center,
         children: [
           _buildSummaryCard(
-            title: 'Total Credit',
-            value: _totalCredit,
-            color: Colors.green,
-            icon: Icons.arrow_upward,
-            isMobile: isMobile,
-          ),
+              title: 'Total Credit',
+              value: _totalCredit,
+              color: Colors.green,
+              icon: Icons.arrow_upward,
+              isMobile: isMobile),
           _buildSummaryCard(
-            title: 'Total Debit',
-            value: _totalDebit,
-            color: Colors.red,
-            icon: Icons.arrow_downward,
-            isMobile: isMobile,
-          ),
+              title: 'Total Debit',
+              value: _totalDebit,
+              color: Colors.red,
+              icon: Icons.arrow_downward,
+              isMobile: isMobile),
           _buildSummaryCard(
-            title: 'Current Balance',
-            value: _currentBalance,
-            color: _currentBalance >= 0 ? Colors.blue : Colors.orange,
-            icon: Icons.account_balance_wallet,
-            isMobile: isMobile,
-          ),
+              title: 'Current Balance',
+              value: _currentBalance,
+              color:
+              _currentBalance >= 0 ? Colors.blue : Colors.orange,
+              icon: Icons.account_balance_wallet,
+              isMobile: isMobile),
         ],
       ),
     );
@@ -1878,9 +2042,9 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
     required IconData icon,
     required bool isMobile,
   }) {
-    final double fontSize = isMobile ? 12.0 : 18.0;
-    final double valueSize = isMobile ? 14.0 : 20.0;
-    final double iconSize = isMobile ? 20.0 : 30.0;
+    final fontSize = isMobile ? 12.0 : 18.0;
+    final valueSize = isMobile ? 14.0 : 20.0;
+    final iconSize = isMobile ? 20.0 : 30.0;
 
     return Card(
       elevation: 4,
@@ -1893,25 +2057,19 @@ class _VendorLedgerPageState extends State<VendorLedgerPage> {
           children: [
             Icon(icon, size: iconSize, color: color),
             const SizedBox(height: 6),
-            Text(
-              title,
-              style: TextStyle(
-                fontSize: fontSize,
-                color: color,
-                fontWeight: FontWeight.bold,
-              ),
-              textAlign: TextAlign.center,
-            ),
+            Text(title,
+                style: TextStyle(
+                    fontSize: fontSize,
+                    color: color,
+                    fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center),
             const SizedBox(height: 4),
-            Text(
-              'Rs ${value.toStringAsFixed(2)}',
-              style: TextStyle(
-                fontSize: valueSize,
-                color: Colors.black87,
-                fontWeight: FontWeight.w500,
-              ),
-              textAlign: TextAlign.center,
-            ),
+            Text('Rs ${value.toStringAsFixed(2)}',
+                style: TextStyle(
+                    fontSize: valueSize,
+                    color: Colors.black87,
+                    fontWeight: FontWeight.w500),
+                textAlign: TextAlign.center),
           ],
         ),
       ),

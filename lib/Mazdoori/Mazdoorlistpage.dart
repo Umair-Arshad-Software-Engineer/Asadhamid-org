@@ -12,6 +12,10 @@ import 'mazdorijob.dart';
 import 'mazdoorLedgerReportPage.dart';
 import 'mazdoorItemWiseLedgerPage.dart';
 import 'mazdoriledger.dart';
+// ── Given / Received record lists ──
+import 'mazdoorTransactionsListPage.dart';
+// ── Per-Mazdoor unified transactions page ──
+import 'mazdoorPersonTransactionsPage.dart';
 
 class MazdoorListPage extends StatefulWidget {
   @override
@@ -106,6 +110,36 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
           ),
         ),
         actions: [
+          // ── All Given records ──
+          IconButton(
+            tooltip: languageProvider.isEnglish
+                ? 'All Given Records'
+                : 'تمام دیے گئے ریکارڈ',
+            icon: const Icon(Icons.outbond, color: Colors.white),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const MazdoorGivenListPage(),
+                ),
+              ).then((_) => _refresh());
+            },
+          ),
+          // ── All Received records ──
+          IconButton(
+            tooltip: languageProvider.isEnglish
+                ? 'All Received Records'
+                : 'تمام وصول شدہ ریکارڈ',
+            icon: const Icon(Icons.call_received, color: Colors.white),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const MazdoorReceivedListPage(),
+                ),
+              ).then((_) => _refresh());
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.white),
             onPressed: _refresh,
@@ -266,6 +300,18 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
                           context, value, m, languageProvider),
                       itemBuilder: (context) => [
                         PopupMenuItem(
+                          value: 'transactions',
+                          child: Row(children: [
+                            const Icon(Icons.swap_horiz,
+                                color: Colors.indigo),
+                            const SizedBox(width: 8),
+                            Text(languageProvider.isEnglish
+                                ? 'Transactions (Given + Received)'
+                                : 'لین دین (دیا + وصول)'),
+                          ]),
+                        ),
+                        const PopupMenuDivider(),
+                        PopupMenuItem(
                           value: 'give_wire',
                           child: Row(children: [
                             const Icon(Icons.outbond,
@@ -285,6 +331,29 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
                             Text(languageProvider.isEnglish
                                 ? 'Receive Bolts / Wire / Cash'
                                 : 'بولٹس / وائر / نقدی وصول کریں'),
+                          ]),
+                        ),
+                        const PopupMenuDivider(),
+                        PopupMenuItem(
+                          value: 'given_list',
+                          child: Row(children: [
+                            const Icon(Icons.north_east,
+                                color: Colors.deepOrange),
+                            const SizedBox(width: 8),
+                            Text(languageProvider.isEnglish
+                                ? 'Given Records'
+                                : 'دیے گئے ریکارڈ'),
+                          ]),
+                        ),
+                        PopupMenuItem(
+                          value: 'received_list',
+                          child: Row(children: [
+                            const Icon(Icons.south_west,
+                                color: Colors.teal),
+                            const SizedBox(width: 8),
+                            Text(languageProvider.isEnglish
+                                ? 'Received Records'
+                                : 'وصول شدہ ریکارڈ'),
                           ]),
                         ),
                         const PopupMenuDivider(),
@@ -411,6 +480,18 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
       LanguageProvider lp,
       ) async {
     switch (value) {
+      case 'transactions':
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => MazdoorPersonTransactionsPage(
+              mazdoorId: m.id,
+              mazdoorName: m.name,
+            ),
+          ),
+        );
+        _refresh();
+        break;
       case 'give_wire':
         await Navigator.push(
           context,
@@ -418,8 +499,8 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
             builder: (_) => MazdoorJobPage(
               mazdoorId: m.id,
               mazdoorName: m.name,
-              mazdoorPhone: m.phone,          // ← add
-              mode: MazdoorJobMode.giveWire,  // or receiveReturn
+              mazdoorPhone: m.phone, // ← add
+              mode: MazdoorJobMode.giveWire, // or receiveReturn
             ),
           ),
         );
@@ -433,6 +514,30 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
               mazdoorId: m.id,
               mazdoorName: m.name,
               mode: MazdoorJobMode.receiveReturn,
+            ),
+          ),
+        );
+        _refresh();
+        break;
+      case 'given_list':
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => MazdoorGivenListPage(
+              mazdoorId: m.id,
+              mazdoorName: m.name,
+            ),
+          ),
+        );
+        _refresh();
+        break;
+      case 'received_list':
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => MazdoorReceivedListPage(
+              mazdoorId: m.id,
+              mazdoorName: m.name,
             ),
           ),
         );
@@ -524,70 +629,108 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
               // ══════════════════════════════════════════════════════
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Row(
+                child: Column(
                   children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        icon: const Icon(Icons.outbond,
-                            size: 18, color: Colors.white),
-                        label: Text(
-                          lp.isEnglish ? 'Give' : 'دیں',
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 12),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.orange[700],
-                          padding:
-                          const EdgeInsets.symmetric(vertical: 10),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8)),
-                        ),
-                        onPressed: () async {
-                          Navigator.pop(context);
-                          await Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => MazdoorJobPage(
-                                mazdoorId: m.id,
-                                mazdoorName: m.name,
-                                mode: MazdoorJobMode.giveWire,
-                              ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            icon: const Icon(Icons.outbond,
+                                size: 18, color: Colors.white),
+                            label: Text(
+                              lp.isEnglish ? 'Give' : 'دیں',
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 12),
                             ),
-                          );
-                          _refresh();
-                        },
-                      ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.orange[700],
+                              padding: const EdgeInsets.symmetric(
+                                  vertical: 10),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8)),
+                            ),
+                            onPressed: () async {
+                              Navigator.pop(context);
+                              await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => MazdoorJobPage(
+                                    mazdoorId: m.id,
+                                    mazdoorName: m.name,
+                                    mode: MazdoorJobMode.giveWire,
+                                  ),
+                                ),
+                              );
+                              _refresh();
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            icon: const Icon(Icons.call_received,
+                                size: 18, color: Colors.white),
+                            label: Text(
+                              lp.isEnglish ? 'Receive' : 'وصول کریں',
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 12),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.teal[400],
+                              padding: const EdgeInsets.symmetric(
+                                  vertical: 10),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8)),
+                            ),
+                            onPressed: () async {
+                              Navigator.pop(context);
+                              await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => MazdoorJobPage(
+                                    mazdoorId: m.id,
+                                    mazdoorName: m.name,
+                                    mode: MazdoorJobMode.receiveReturn,
+                                  ),
+                                ),
+                              );
+                              _refresh();
+                            },
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
+                    const SizedBox(height: 8),
+                    // ── NEW: prominent per-Mazdoor transactions button ──
+                    SizedBox(
+                      width: double.infinity,
                       child: ElevatedButton.icon(
-                        icon: const Icon(Icons.call_received,
+                        icon: const Icon(Icons.swap_horiz,
                             size: 18, color: Colors.white),
                         label: Text(
-                          lp.isEnglish ? 'Receive' : 'وصول کریں',
+                          lp.isEnglish
+                              ? 'View All Transactions (Given + Received)'
+                              : 'تمام لین دین دیکھیں (دیا + وصول)',
                           style: const TextStyle(
                               color: Colors.white, fontSize: 12),
                         ),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.teal[400],
-                          padding:
-                          const EdgeInsets.symmetric(vertical: 10),
+                          backgroundColor: Colors.indigo,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
                           shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(8)),
                         ),
-                        onPressed: () async {
+                        onPressed: () {
                           Navigator.pop(context);
-                          await Navigator.push(
+                          Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) => MazdoorJobPage(
+                              builder: (_) => MazdoorPersonTransactionsPage(
                                 mazdoorId: m.id,
                                 mazdoorName: m.name,
-                                mode: MazdoorJobMode.receiveReturn,
                               ),
                             ),
-                          );
-                          _refresh();
+                          ).then((_) => _refresh());
                         },
                       ),
                     ),
@@ -599,12 +742,60 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
               const Divider(height: 1),
 
               // ══════════════════════════════════════════════════════
+              // GIVEN / RECEIVED RECORD LISTS
+              // ══════════════════════════════════════════════════════
+              ListTile(
+                leading: const Icon(Icons.north_east,
+                    color: Colors.deepOrange),
+                title: Text(
+                    lp.isEnglish ? 'Given Records' : 'دیے گئے ریکارڈ'),
+                subtitle: Text(lp.isEnglish
+                    ? 'All bolts / wire / cash given'
+                    : 'دیے گئے تمام بولٹس / وائر / نقد'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => MazdoorGivenListPage(
+                        mazdoorId: m.id,
+                        mazdoorName: m.name,
+                      ),
+                    ),
+                  ).then((_) => _refresh());
+                },
+              ),
+              ListTile(
+                leading:
+                const Icon(Icons.south_west, color: Colors.teal),
+                title: Text(
+                    lp.isEnglish ? 'Received Records' : 'وصول شدہ ریکارڈ'),
+                subtitle: Text(lp.isEnglish
+                    ? 'All bolts / wire / cash received'
+                    : 'وصول شدہ تمام بولٹس / وائر / نقد'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => MazdoorReceivedListPage(
+                        mazdoorId: m.id,
+                        mazdoorName: m.name,
+                      ),
+                    ),
+                  ).then((_) => _refresh());
+                },
+              ),
+              const Divider(height: 1),
+
+              // ══════════════════════════════════════════════════════
               // LEDGER VIEWS
               // ══════════════════════════════════════════════════════
               ListTile(
                 leading:
                 const Icon(Icons.receipt_long, color: Colors.teal),
-                title: Text(lp.isEnglish ? 'Simple Ledger' : 'سادہ کھاتہ'),
+                title:
+                Text(lp.isEnglish ? 'Simple Ledger' : 'سادہ کھاتہ'),
                 subtitle: Text(lp.isEnglish
                     ? 'Transactions with expandable wire items'
                     : 'لین دین، وائر آئٹمز کے ساتھ'),
@@ -626,8 +817,8 @@ class _MazdoorListPageState extends State<MazdoorListPage> {
               ),
               ListTile(
                 leading: const Icon(Icons.list_alt, color: Colors.blue),
-                title:
-                Text(lp.isEnglish ? 'Item-Wise Ledger' : 'آئٹم وار کھاتہ'),
+                title: Text(
+                    lp.isEnglish ? 'Item-Wise Ledger' : 'آئٹم وار کھاتہ'),
                 subtitle: Text(lp.isEnglish
                     ? 'Every wire / bolt / cash movement as a row'
                     : 'ہر وائر / بولٹ / نقد کی حرکت'),

@@ -62,7 +62,7 @@ import 'Provider/reportprovider.dart';
         builder: (context, languageProvider, child) {
           return MaterialApp(
             debugShowCheckedModeBanner: false,
-            home: LoginPage(),
+            home: Dashboard(),
             theme: ThemeData(
               fontFamily: languageProvider.isEnglish ? 'Roboto' : 'JameelNoori',
             ),

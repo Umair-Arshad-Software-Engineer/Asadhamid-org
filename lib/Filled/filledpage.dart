@@ -88,8 +88,17 @@ class _filledpageState extends State<filledpage> {
   String? _selectedCustomerSerial;
   Map<String, int> _customerLastNumbers = {};
   String? _lastReferenceNumber;
+  static String? _lastPngSignature;
+  static Uint8List? _lastPngBytes;
 
-
+  static pw.MemoryImage? _pdfLogoImage;
+  static pw.Font? _pdfItalicFont;
+  static bool _pdfAssetsReady = false;
+  static final Map<String, Future<pw.MemoryImage>> _textImageCache = {};
+  static String? _lastPdfSignature;
+  static Uint8List? _lastPdfBytes;
+  static final RegExp _nonLatin = RegExp(r'[^\x00-\xFF]');
+  bool _needsImage(String t) => t.isNotEmpty && _nonLatin.hasMatch(t);
 
   /// 0300-1234567 / +92 300 1234567 -> 923001234567
   String? _normalizePkNumber(String raw) {
@@ -123,32 +132,36 @@ class _filledpageState extends State<filledpage> {
     final number = _normalizePkNumber(customer.phone);
     if (number == null) return;
     if (!await _isWhatsAppAvailable(number)) return;
-
-    await _fetchRemainingBalance();
     if (!mounted) return;
 
-    final message = 'Assalam o Alaikum ${customer.name},\n'
-        'Your invoice #$invoiceNumber has been ${widget.filled == null ? 'created' : 'updated'}.\n'
-        'Reference: ${_referenceController.text}\n'
-        'Total: Rs ${grandTotal.toStringAsFixed(2)}\n'
-        'Remaining balance: Rs ${_remainingBalance.toStringAsFixed(2)}\n'
-        'Thank you!';
-
-    // Build PDF + first-page image BEFORE the dialog so the clipboard/share
-    // call can run directly inside the button tap (browser needs a user gesture).
+    // Spinner right away so the user sees feedback immediately.
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (_) => const Center(child: CircularProgressIndicator()),
     );
 
+    // Build PDF + first-page image BEFORE the dialog so the clipboard/share
+    // call can run directly inside the button tap (browser needs a user gesture).
     Uint8List? pdfBytes;
     Uint8List? pngBytes;
     try {
+      // Also sets _remainingBalance, so no second ledger download is needed.
       pdfBytes = await _generatePDFBytes(invoiceNumber);
-      await for (final page in Printing.raster(pdfBytes, pages: [0], dpi: 144)) {
-        pngBytes = await page.toPng();
-        break;
+
+      final sig = _lastPdfSignature;
+      if (sig != null && _lastPngSignature == sig && _lastPngBytes != null) {
+        // Same invoice as last time -> reuse the rendered image instantly.
+        pngBytes = _lastPngBytes;
+      } else {
+        await for (final page in Printing.raster(pdfBytes, pages: [0], dpi: 110)) {
+          pngBytes = await page.toPng();
+          break;
+        }
+        if (pngBytes != null) {
+          _lastPngSignature = sig;
+          _lastPngBytes = pngBytes;
+        }
       }
     } catch (e) {
       print('Invoice build failed: $e');
@@ -156,6 +169,13 @@ class _filledpageState extends State<filledpage> {
 
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop(); // close spinner
+
+    final message = 'Assalam o Alaikum ${customer.name},\n'
+        'Your invoice #$invoiceNumber has been ${widget.filled == null ? 'created' : 'updated'}.\n'
+        'Reference: ${_referenceController.text}\n'
+        'Total: Rs ${grandTotal.toStringAsFixed(2)}\n'
+        'Remaining balance: Rs ${_remainingBalance.toStringAsFixed(2)}\n'
+        'Thank you!';
 
     final isEn = languageProvider.isEnglish;
 
@@ -343,7 +363,41 @@ class _filledpageState extends State<filledpage> {
 
 
 
+  /// Loads and decodes logos once, then reuses them for every PDF.
+  Future<void> _ensurePdfAssets() async {
+    if (_pdfAssetsReady) return;
 
+    Future<pw.MemoryImage?> load(String path) async {
+      try {
+        final data = await rootBundle.load(path);
+        return pw.MemoryImage(data.buffer.asUint8List());
+      } catch (_) {
+        return null;
+      }
+    }
+
+    final results = await Future.wait([
+      load('assets/images/logo.png'),
+    ]);
+    _pdfLogoImage = results[0];
+    _pdfItalicFont = pw.Font.timesItalic();
+    _pdfAssetsReady = true;
+  }
+
+  Future<pw.MemoryImage> _getTextImage(
+      String text, {
+        required double fontSize,
+        required double width,
+        required double height,
+      }) {
+    if (_textImageCache.length > 500) _textImageCache.clear();
+    final key = '$fontSize|$width|$height|$text';
+    return _textImageCache.putIfAbsent(
+      key,
+          () async => pw.MemoryImage(await _renderTextAsImage(text,
+          fontSize: fontSize, width: width, height: height)),
+    );
+  }
 
 
   void _showLengthCombinationDialog(Item item, int rowIndex) async {
@@ -1440,7 +1494,8 @@ class _filledpageState extends State<filledpage> {
         double fontSize = 10,
         double width = 100,
         double height = 20,
-      }) async {
+      })
+  async {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     final bgPaint = Paint()..color = const Color(0xFFFFFFFF);
@@ -1469,67 +1524,52 @@ class _filledpageState extends State<filledpage> {
     return afterDiscount + _mazdoori;
   }
 
-  Future<Uint8List> _generatePDFBytes(String filledNumber) async {
-    final pdf = pw.Document();
 
-    // ✅ Providers
-    final languageProvider =
-    Provider.of<LanguageProvider>(context, listen: false);
+  Future<Uint8List> _generatePDFBytes(String filledNumber) async {
+    // ───────────── Providers & data ─────────────
     final customerProvider =
     Provider.of<CustomerProvider>(context, listen: false);
-    final filledProvider =
-    Provider.of<FilledProvider>(context, listen: false);
+    final filledProvider = Provider.of<FilledProvider>(context, listen: false);
 
     final filled = widget.filled ?? _currentFilled;
     if (filled == null) throw Exception("No invoice data available");
+    if (_selectedCustomerId == null) throw Exception("No customer selected");
 
-    // ✅ Filter empty rows
     final nonEmptyRows = _filledRows
         .where((row) => (row['itemName'] as String).isNotEmpty)
         .toList();
 
-    // ✅ Payments
-    double paidAmount = 0.0;
-    try {
-      final payments =
-      await filledProvider.getFilledPayments(filled['filledNumber']);
-      paidAmount = payments.fold(
-          0.0, (sum, p) => sum + (_parseToDouble(p['amount']) ?? 0.0));
-    } catch (e) {
-      print("Payment fetch error: $e");
-    }
-
-    double grandTotal = _calculateGrandTotal();
-    double remainingAmount = grandTotal - paidAmount;
-
-    // ✅ Ledger balance
-    double totalRemainingBalance = 0.0;
-    if (_selectedCustomerId != null) {
+    // Run Firebase reads + asset loading in parallel
+    final balanceFuture = _getRemainingBalance(_selectedCustomerId!);
+    final assetsFuture = _ensurePdfAssets();
+    final paymentsFuture = () async {
       try {
-        totalRemainingBalance =
-        await _getRemainingBalance(_selectedCustomerId!);
+        final payments =
+        await filledProvider.getFilledPayments(filled['filledNumber']);
+        return payments.fold<double>(
+            0.0, (sum, p) => sum + _parseToDouble(p['amount']));
       } catch (e) {
-        print("Balance fetch error: $e");
+        print("Payment fetch error: $e");
+        return 0.0;
       }
-    }
+    }();
 
-    double previousBalance = totalRemainingBalance - remainingAmount;
+    final double paidAmount = await paymentsFuture;
+    final double totalRemainingBalance = await balanceFuture;
+    _remainingBalance = totalRemainingBalance; // reused by the WhatsApp message
+    await assetsFuture;
 
-    if (_selectedCustomerId == null)
-      throw Exception("No customer selected");
+    final double grandTotal = _calculateGrandTotal();
+    final double remainingAmount = grandTotal - paidAmount;
+    final double previousBalance = totalRemainingBalance - remainingAmount;
 
     final selectedCustomer = customerProvider.customers.firstWhere(
           (c) => c.id == _selectedCustomerId,
       orElse: () => Customer(
-        id: 'unknown',
-        name: 'Unknown',
-        phone: '',
-        address: '',
-        city: '',
-      ),
+          id: 'unknown', name: 'Unknown', phone: '', address: '', city: ''),
     );
 
-    // ✅ Date
+    // ───────────── Date ─────────────
     DateTime filledDate;
     if (widget.filled != null) {
       filledDate = DateTime.parse(widget.filled!['createdAt']);
@@ -1541,519 +1581,885 @@ class _filledpageState extends State<filledpage> {
     } else {
       filledDate = DateTime.now();
     }
+    String two(int n) => n.toString().padLeft(2, '0');
+    final dateText =
+        '${filledDate.year}-${two(filledDate.month)}-${two(filledDate.day)} '
+        '${two(filledDate.hour)}:${two(filledDate.minute)}';
 
-    final formattedDate =
-        '${filledDate.day}/${filledDate.month}/${filledDate.year}';
-    final formattedTime =
-        '${filledDate.hour}:${filledDate.minute.toString().padLeft(2, '0')}';
+    // ───────────── Whole-PDF cache ─────────────
+    // Same content + same payments + same balance => reuse the last PDF.
+    final signature = [
+      filledNumber,
+      _selectedCustomerId,
+      selectedCustomer.name,
+      selectedCustomer.phone,
+      selectedCustomer.address,
+      paidAmount,
+      totalRemainingBalance,
+      _discount,
+      _mazdoori,
+      dateText,
+      _biltiNumberController.text.trim(),
+      _transportCompanyController.text.trim(),
+      jsonEncode(nonEmptyRows
+          .map((r) => [
+        r['itemName'],
+        r['size'],
+        r['length'],
+        r['bodyType'],
+        r['description'],
+        r['qty'],
+        r['rate'],
+        r['total'],
+        r['weightPerUnit'],
+        r['totalWeight'],
+        r['calculationType'],
+      ])
+          .toList()),
+    ].join('|');
 
-    // Get company logo
-    Uint8List? logoBytes;
-    try {
-      final ByteData logoData = await rootBundle.load('assets/images/logo.png');
-      logoBytes = logoData.buffer.asUint8List();
-    } catch (e) {
-      // Logo not found, will use text fallback
+    if (_lastPdfSignature == signature && _lastPdfBytes != null) {
+      return _lastPdfBytes!;
     }
 
-    final lineImage =
-    pw.MemoryImage((await rootBundle.load('assets/images/line.png'))
-        .buffer
-        .asUint8List());
+    final pdf = pw.Document();
 
-    final footerLogo =
-    pw.MemoryImage((await rootBundle.load('assets/images/devlogo.png'))
-        .buffer
-        .asUint8List());
+    // ───────────── Cached assets ─────────────
+    final logoImage = _pdfLogoImage;
+    final italicFont = _pdfItalicFont ?? pw.Font.timesItalic();
 
-
-    final jazzcashLogo =
-    pw.MemoryImage((await rootBundle.load('assets/images/jazzcashlogo.png'))
-        .buffer
-        .asUint8List());
-
-
-    final ublLogo =
-    pw.MemoryImage((await rootBundle.load('assets/images/ubl.png'))
-        .buffer
-        .asUint8List());
-
-    final locationLogo =
-    pw.MemoryImage((await rootBundle.load('assets/images/location.jpeg'))
-        .buffer
-        .asUint8List());
+    // ───────────── Row calculations ─────────────
+    double rowWeight(Map<String, dynamic> r) {
+      final qty = _parseToDouble(r['qty']);
+      final tw = _parseToDouble(r['totalWeight']);
+      final wpu = _parseToDouble(r['weightPerUnit']);
+      if (r['calculationType'] == 'weight' && tw > 0) return tw;
+      if (wpu > 0) return wpu * qty;
+      return 0.0;
+    }
 
     final totalQty = nonEmptyRows.fold<double>(
-        0.0, (s, r) => s + (_parseToDouble(r['qty']) ?? 0.0));
+        0.0, (s, r) => s + _parseToDouble(r['qty']));
+    final totalWeight =
+    nonEmptyRows.fold<double>(0.0, (s, r) => s + rowWeight(r));
 
-    // ✅ Calculate total weight
-    final totalWeight = nonEmptyRows.fold<double>(
-        0.0, (s, r) {
-      final weight = r['totalWeight'] ?? 0.0;
-      final qty = r['qty'] ?? 0.0;
-      final weightPerUnit = r['weightPerUnit'] ?? 0.0;
+    String fmtQty(double q) =>
+        q % 1 == 0 ? q.toInt().toString() : q.toStringAsFixed(2);
 
-      if (r['calculationType'] == 'weight' && weight > 0) {
-        return s + weight;
-      } else if (weightPerUnit > 0) {
-        return s + (weightPerUnit * qty);
-      }
-      return s;
-    }
-    );
-
-    // ── Pre-render text as images (same method as purchase page) ──
-    final Map<String, Uint8List> sizeImages = {};
-    final Map<String, Uint8List> lengthImages = {};
-    final Map<String, Uint8List> bodyImages = {};
-    final Map<String, Uint8List> descImages = {};
+    // ───────────── Urdu-safe text images (only when needed, cached, parallel) ─────────────
+    final Map<String, pw.MemoryImage> sizeImages = {};
+    final Map<String, pw.MemoryImage> lengthImages = {};
+    final Map<String, pw.MemoryImage> bodyImages = {};
+    final Map<String, pw.MemoryImage> descImages = {};
 
     String sizeOf(Map<String, dynamic> r) {
       final s = (r['size']?.toString() ?? '').trim();
       return s.isNotEmpty ? s : (r['itemName']?.toString() ?? '');
     }
 
+    final jobs = <Future<void>>[];
+    void queue(Map<String, pw.MemoryImage> target, String text,
+        double fontSize, double w, double h) {
+      if (!_needsImage(text) || target.containsKey(text)) return;
+      target[text] = _placeholderImage; // reserve key, replaced below
+      jobs.add(_getTextImage(text, fontSize: fontSize, width: w, height: h)
+          .then((img) => target[text] = img));
+    }
+
     for (final r in nonEmptyRows) {
-      final size = sizeOf(r);
-      if (size.isNotEmpty && !sizeImages.containsKey(size)) {
-        sizeImages[size] = await _renderTextAsImage(size,
-            fontSize: 11, width: 130, height: 20);
-      }
-      final length = r['length']?.toString() ?? '';
-      if (length.isNotEmpty && !lengthImages.containsKey(length)) {
-        lengthImages[length] = await _renderTextAsImage(length,
-            fontSize: 11, width: 80, height: 20);
-      }
-      final body = r['bodyType']?.toString() ?? '';
-      if (body.isNotEmpty && !bodyImages.containsKey(body)) {
-        bodyImages[body] = await _renderTextAsImage(body,
-            fontSize: 11, width: 70, height: 20);
-      }
-      final desc = (r['description']?.toString() ?? '').trim();
-      if (desc.isNotEmpty && !descImages.containsKey(desc)) {
-        descImages[desc] = await _renderTextAsImage(desc,
-            fontSize: 11, width: 110, height: 20);
-      }
+      queue(sizeImages, sizeOf(r), 42, 228, 66);
+      queue(lengthImages, r['length']?.toString() ?? '', 42, 201, 66);
+      queue(bodyImages, r['bodyType']?.toString() ?? '', 42, 144, 66);
+      queue(descImages, (r['description']?.toString() ?? '').trim(), 11, 110, 20);
     }
 
-// Customer / transport lines (may contain Urdu)
-    final custNameImg = await _renderTextAsImage(
-        'Customer Name: ${selectedCustomer.name}',
-        fontSize: 11, width: 300, height: 18);
-    final custAddrImg = await _renderTextAsImage(
-        'Customer Address: ${selectedCustomer.address}',
-        fontSize: 11, width: 300, height: 18);
-    final transportImg = await _renderTextAsImage(
-        'Transport Company: ${_transportCompanyController.text}',
-        fontSize: 11, width: 250, height: 18);
-
-    pw.Widget imgCell(Uint8List? bytes, String fallback) {
-      if (bytes != null) {
-        return pw.Padding(
-          padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 2),
-          child: pw.SizedBox(
-            height: 20,
-            child: pw.Image(pw.MemoryImage(bytes), fit: pw.BoxFit.contain),
-          ),
-        );
-      }
-      return _cell(fallback);
+    // Customer fields (may contain Urdu)
+    pw.MemoryImage? custNameImg;
+    pw.MemoryImage? custAddrImg;
+    if (_needsImage(selectedCustomer.name)) {
+      jobs.add(_getTextImage(selectedCustomer.name,
+          fontSize: 42, width: 165 * 3, height: 66)
+          .then((img) => custNameImg = img));
+    }
+    if (_needsImage(selectedCustomer.address)) {
+      jobs.add(_getTextImage(selectedCustomer.address,
+          fontSize: 42, width: 165 * 3, height: 66)
+          .then((img) => custAddrImg = img));
     }
 
-    pw.Widget lineImg(Uint8List bytes, double w) => pw.SizedBox(
-      width: w,
-      height: 18,
-      child: pw.Image(pw.MemoryImage(bytes), fit: pw.BoxFit.contain),
+    await Future.wait(jobs);
+
+    // ───────────── Theme ─────────────
+    final navy = PdfColor.fromInt(0xFF0B2A5B);
+    final navyDark = PdfColor.fromInt(0xFF082247);
+    final orange = PdfColor.fromInt(0xFFF26B1D);
+    final softBg = PdfColor.fromInt(0xFFEEF3FA);
+    final softLine = PdfColor.fromInt(0xFFC9D4E5);
+    final grey = PdfColor.fromInt(0xFF5B6678);
+    const double pageW = 595.28;
+    const double headerH = 138;
+    const double footerH = 54;
+
+    // ───────────── Small helpers ─────────────
+    pw.Widget pad(pw.Widget w, {double v = 0}) => pw.Padding(
+        padding: pw.EdgeInsets.symmetric(horizontal: 22, vertical: v),
+        child: w);
+
+    pw.Widget dot() => pw.Container(
+      width: 4,
+      height: 4,
+      margin: const pw.EdgeInsets.symmetric(horizontal: 5),
+      decoration:
+      pw.BoxDecoration(color: orange, shape: pw.BoxShape.circle),
     );
 
-    // ✅ PDF
-    pdf.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(10),
+    pw.Widget txt(String t,
+        {double size = 10,
+          bool bold = false,
+          PdfColor? color,
+          pw.TextAlign? align}) =>
+        pw.Text(t,
+            textAlign: align,
+            style: pw.TextStyle(
+                fontSize: size,
+                fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal,
+                color: color ?? PdfColors.black));
 
-        // ==================================
-        // ✅ HEADER (FIRST PAGE ONLY)
-        // ==================================
-        header: (context) {
-          if (context.pageNumber != 1) return pw.SizedBox();
+    pw.Widget slant(PdfColor c,
+        {double w = 14, double h = 30, bool lean = true}) =>
+        pw.CustomPaint(
+          size: PdfPoint(w, h),
+          painter: (PdfGraphics canvas, PdfPoint size) {
+            canvas.setFillColor(c);
+            if (lean) {
+              canvas.moveTo(0, 0);
+              canvas.lineTo(w * 0.55, 0);
+              canvas.lineTo(w, h);
+              canvas.lineTo(w * 0.45, h);
+            } else {
+              canvas.moveTo(w * 0.45, 0);
+              canvas.lineTo(w, 0);
+              canvas.lineTo(w * 0.55, h);
+              canvas.lineTo(0, h);
+            }
+            canvas.closePath();
+            canvas.fillPath();
+          },
+        );
 
-          return pw.Column(
-            children: [
-              pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+    // ───────────── HEADER ─────────────
+    pw.Widget buildHeader() {
+      return pw.SizedBox(
+        width: pageW,
+        height: headerH,
+        child: pw.Stack(children: [
+          pw.Positioned(
+            left: 0,
+            top: 0,
+            child: pw.CustomPaint(
+              size: const PdfPoint(pageW, headerH),
+              painter: (PdfGraphics c, PdfPoint s) {
+                c.setFillColor(orange);
+                c.moveTo(382, 0);
+                c.lineTo(410, 0);
+                c.lineTo(458, headerH);
+                c.lineTo(430, headerH);
+                c.closePath();
+                c.fillPath();
+
+                c.setFillColor(navy);
+                c.moveTo(410, 0);
+                c.lineTo(pageW, 0);
+                c.lineTo(pageW, headerH);
+                c.lineTo(458, headerH);
+                c.closePath();
+                c.fillPath();
+              },
+            ),
+          ),
+          pw.Positioned(
+            left: 0,
+            bottom: 0,
+            child: pw.Container(width: pageW, height: 5, color: navy),
+          ),
+          pw.Positioned(
+            right: 16,
+            top: 18,
+            child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.end,
                 children: [
-                  // Logo or fallback text
-                  logoBytes != null
-                      ? pw.Container(
-                    width: 80,
-                    height: 80,
-                    child: pw.Image(pw.MemoryImage(logoBytes)),
-                  )
+                  txt('STRENGTH', size: 13, bold: true, color: PdfColors.white),
+                  txt('YOU CAN', size: 13, bold: true, color: PdfColors.white),
+                  txt('TRUST', size: 13, bold: true, color: PdfColors.white),
+                  pw.SizedBox(height: 3),
+                  pw.Container(width: 70, height: 1.5, color: orange),
+                ]),
+          ),
+          pw.Positioned(
+            right: 14,
+            bottom: 16,
+            child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.center,
+                children: [
+                  pw.Text('Mughal Group of Industries',
+                      style: pw.TextStyle(
+                          font: italicFont,
+                          fontSize: 12,
+                          color: PdfColors.white)),
+                  pw.SizedBox(height: 2),
+                  txt('IRON WIRE  -  BOLTS', size: 6.5, color: PdfColors.white),
+                ]),
+          ),
+          pw.Positioned(
+            left: 20,
+            top: 14,
+            child: pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  logoImage != null
+                      ? pw.SizedBox(
+                      width: 62,
+                      height: 62,
+                      child: pw.Image(logoImage,
+                          fit: pw.BoxFit.contain))
                       : pw.Container(
-                    width: 80,
-                    height: 80,
-                    decoration: pw.BoxDecoration(
-                      color: PdfColors.orangeAccent,
-                      borderRadius: pw.BorderRadius.circular(40),
+                      width: 56,
+                      height: 56,
+                      decoration: pw.BoxDecoration(
+                          color: orange, shape: pw.BoxShape.circle),
+                      child: pw.Center(
+                          child: txt('MGI',
+                              size: 16,
+                              bold: true,
+                              color: PdfColors.white))),
+                  pw.SizedBox(width: 10),
+                  pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        txt('MUGHAL GROUP', size: 26, bold: true, color: navy),
+                        txt('OF INDUSTRIES', size: 19, bold: true, color: navy),
+                        pw.SizedBox(height: 5),
+                        pw.Row(children: [
+                          pw.Container(width: 24, height: 1, color: orange),
+                          pw.SizedBox(width: 6),
+                          txt('IRON WIRE', size: 11, bold: true, color: orange),
+                          dot(),
+                          txt('BOLTS', size: 11, bold: true, color: orange),
+                          pw.SizedBox(width: 6),
+                          pw.Container(width: 24, height: 1, color: orange),
+                        ]),
+                        pw.SizedBox(height: 7),
+                        pw.Row(children: [
+                          txt('HAFIZ ASAD IDREES',
+                              size: 8.5, bold: true, color: navy),
+                          dot(),
+                          txt('M. HAMID KHALIL',
+                              size: 8.5, bold: true, color: navy),
+                        ]),
+                        pw.SizedBox(height: 3),
+                        txt('Hafizabad Road, Gujranwala, Pakistan',
+                            size: 8.5, color: navy),
+                        pw.SizedBox(height: 3),
+                        txt('0370-4219219  |  0371-3084600',
+                            size: 9.5, bold: true, color: navy),
+                      ]),
+                ]),
+          ),
+        ]),
+      );
+    }
+
+    // ───────────── FOOTER ─────────────
+    pw.Widget buildFooter() {
+      pw.Widget line(String t) => pw.Padding(
+        padding: const pw.EdgeInsets.only(bottom: 3),
+        child: pw.Row(children: [
+          pw.Container(
+              width: 6,
+              height: 6,
+              decoration: pw.BoxDecoration(
+                  color: PdfColors.white, shape: pw.BoxShape.circle)),
+          pw.SizedBox(width: 8),
+          txt(t, size: 8.5, color: PdfColors.white),
+        ]),
+      );
+
+      return pw.SizedBox(
+        width: pageW,
+        height: footerH,
+        child: pw.Stack(children: [
+          pw.Positioned(
+            left: 0,
+            top: 0,
+            child: pw.CustomPaint(
+              size: const PdfPoint(pageW, footerH),
+              painter: (PdfGraphics c, PdfPoint s) {
+                c.setFillColor(navy);
+                c.moveTo(0, 0);
+                c.lineTo(pageW, 0);
+                c.lineTo(pageW, footerH);
+                c.lineTo(0, footerH);
+                c.closePath();
+                c.fillPath();
+
+                c.setFillColor(navyDark);
+                c.moveTo(372, 0);
+                c.lineTo(pageW, 0);
+                c.lineTo(pageW, footerH);
+                c.lineTo(398, footerH);
+                c.closePath();
+                c.fillPath();
+
+                c.setFillColor(orange);
+                c.moveTo(360, 0);
+                c.lineTo(372, 0);
+                c.lineTo(398, footerH);
+                c.lineTo(386, footerH);
+                c.closePath();
+                c.fillPath();
+              },
+            ),
+          ),
+          pw.Positioned(
+            left: 22,
+            top: 9,
+            child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  line('0370-4219219 | 0371-3084600'),
+                  line('mughalgroupofindustrie@gmail.com'),
+                  line('Hafizabad Road, Gujranwala, Pakistan'),
+                ]),
+          ),
+          pw.Positioned(
+            right: 22,
+            top: 7,
+            child: pw.SizedBox(
+              width: 120,
+              child: pw.Column(
+                mainAxisSize: pw.MainAxisSize.min,
+                children: [
+                  // swittix (SVG logo)
+                  pw.SizedBox(
+                    width: 120,
+                    height: 23, // 120 * 450 / 2378 ≈ 22.7
+                    child: pw.SvgImage(
+                      svg: _swittixSvgString,
+                      fit: pw.BoxFit.contain,
                     ),
-                    child: pw.Center(
-                      child: pw.Text(
-                        'MGI',
+                  ),
+                  pw.SizedBox(height: 4),
+                  // ── Technologies ──
+                  pw.Row(
+                    mainAxisAlignment: pw.MainAxisAlignment.center,
+                    children: [
+                      pw.Expanded(
+                        child: pw.Container(
+                            height: 1, color: PdfColor.fromInt(0xFF1565FF)),
+                      ),
+                      pw.SizedBox(width: 4),
+                      pw.Text(
+                        'TECHNOLOGIES',
                         style: pw.TextStyle(
-                          fontSize: 16,
+                          fontSize: 6.5,
                           fontWeight: pw.FontWeight.bold,
+                          letterSpacing: 1.2,
                           color: PdfColors.white,
                         ),
                       ),
-                    ),
+                      pw.SizedBox(width: 4),
+                      pw.Expanded(
+                        child: pw.Container(
+                            height: 1, color: PdfColor.fromInt(0xFF1565FF)),
+                      ),
+                    ],
                   ),
-
-                  // Company Info
-                  pw.Column(
-                    crossAxisAlignment: pw.CrossAxisAlignment.center,
+                  pw.Row(
+                    mainAxisAlignment: pw.MainAxisAlignment.center,
                     children: [
                       pw.Text(
-                        'MUGHAL GROUP OF INDUSTRIES',
+                        'WWW.SWITTIX.COM',
                         style: pw.TextStyle(
-                          fontSize: 16,
+                          fontSize: 6.5,
                           fontWeight: pw.FontWeight.bold,
-                          color: PdfColors.blue800,
-                        ),
-                      ),
-                      pw.SizedBox(height: 4),
-                      pw.Text(
-                        'Specialist in Bolt, Nut, Washer & Soft/Hard Steel Wire.\n All Sizes Available | Custom Manufacturing | Factory Rate',
-                        style: pw.TextStyle(
-                          fontSize: 12,
-                          color: PdfColors.grey700,
-                        ),
-                      ),
-                      pw.SizedBox(height: 4),
-                      pw.Text(
-                        'Address:  Gujranwala, Pakistan',
-                        style: pw.TextStyle(
-                          fontSize: 10,
-                          color: PdfColors.grey600,
-                        ),
-                      ),
-                      pw.SizedBox(height: 4),
-                      pw.Text(
-                        'Phone:  03704219219 // 03713084600 | Email: mughalgroupofindustrie@gmil.com',
-                        style: pw.TextStyle(
-                          fontSize: 10,
-                          color: PdfColors.grey600,
+                          letterSpacing: 1.2,
+                          color: PdfColors.white,
                         ),
                       ),
                     ],
                   ),
-
-                  // Gate Pass Label
-                  pw.Container(
-                    padding: pw.EdgeInsets.all(12),
-                    decoration: pw.BoxDecoration(
-                      color: PdfColors.orangeAccent,
-                      borderRadius: pw.BorderRadius.circular(8),
-                    ),
-                    child: pw.Column(
-                      children: [
-                        pw.Text(
-                          'Ref #',
-                          style: pw.TextStyle(
-                            fontSize: 14,
-                            fontWeight: pw.FontWeight.bold,
-                            color: PdfColors.white,
-                          ),
-                        ),
-                        pw.SizedBox(height: 4),
-                        pw.Text(
-                          '#${_referenceController.text.isNotEmpty ? _referenceController.text : 'Q${DateTime.now().millisecondsSinceEpoch.toString().substring(8)}'}',
-                          style: pw.TextStyle(
-                            fontSize: 12,
-                            color: PdfColors.white,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
                 ],
               ),
-              pw.Divider(),
-            ],
-          );
+            ),
+          ),
+        ]),
+      );
+    }
+
+    // ───────────── Title banner ─────────────
+    pw.Widget titleBanner() => pw.Row(
+        mainAxisAlignment: pw.MainAxisAlignment.center,
+        children: [
+          slant(navy, w: 16),
+          pw.SizedBox(width: 3),
+          slant(navy, w: 10),
+          pw.SizedBox(width: 4),
+          pw.Container(
+            width: 330,
+            height: 30,
+            alignment: pw.Alignment.center,
+            color: orange,
+            child: txt('CUSTOMER SALES INVOICE',
+                size: 18, bold: true, color: PdfColors.white),
+          ),
+          pw.SizedBox(width: 4),
+          slant(navy, w: 10, lean: false),
+          pw.SizedBox(width: 3),
+          slant(navy, w: 16, lean: false),
+        ]);
+
+    // ───────────── Invoice no / date boxes ─────────────
+    pw.Widget infoBox(String label, String value) => pw.Container(
+      width: 175,
+      padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: pw.BoxDecoration(
+          color: softBg,
+          border: pw.Border.all(color: softLine, width: 0.7),
+          borderRadius: pw.BorderRadius.circular(6)),
+      child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            txt(label, size: 9, color: grey),
+            pw.SizedBox(height: 2),
+            txt(value, size: 13, bold: true, color: navy),
+          ]),
+    );
+
+    // ───────────── Section frame ─────────────
+    pw.Widget sectionHeader(String title) => pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: pw.BoxDecoration(
+          color: navy,
+          borderRadius: const pw.BorderRadius.only(
+              topLeft: pw.Radius.circular(8),
+              topRight: pw.Radius.circular(8))),
+      child: txt(title, size: 11, bold: true, color: PdfColors.white),
+    );
+
+    pw.Widget sectionBody(pw.Widget child) => pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: pw.BoxDecoration(
+          border: pw.Border.all(color: navy, width: 0.8),
+          borderRadius: const pw.BorderRadius.only(
+              bottomLeft: pw.Radius.circular(8),
+              bottomRight: pw.Radius.circular(8))),
+      child: child,
+    );
+
+    // Labeled, underlined field (image only when text is Urdu)
+    pw.Widget field(String label, {pw.MemoryImage? img, String text = ''}) {
+      final pw.Widget value = img != null
+          ? pw.SizedBox(
+          height: 22,
+          child: pw.Image(img,
+              fit: pw.BoxFit.contain, alignment: pw.Alignment.centerLeft))
+          : txt(text, size: 10);
+
+      return pw.Padding(
+        padding: const pw.EdgeInsets.only(bottom: 8),
+        child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
+          pw.SizedBox(width: 78, child: txt(label, size: 10)),
+          txt(':  ', size: 10),
+          pw.Expanded(
+            child: pw.Container(
+              height: 24,
+              alignment: pw.Alignment.bottomLeft,
+              decoration: pw.BoxDecoration(
+                  border: pw.Border(
+                      bottom: pw.BorderSide(color: navy, width: 0.5))),
+              child: value,
+            ),
+          ),
+        ]),
+      );
+    }
+
+    pw.Widget customerSection() => pw.Column(children: [
+      sectionHeader('CUSTOMER DETAILS'),
+      sectionBody(pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Expanded(
+                child: pw.Column(children: [
+                  field('Customer Name',
+                      img: custNameImg, text: selectedCustomer.name),
+                ])),
+            pw.SizedBox(width: 18),
+            pw.Expanded(
+                child: pw.Column(children: [
+                  field('Phone Number', text: selectedCustomer.phone),
+                  field('Address',
+                      img: custAddrImg, text: selectedCustomer.address),
+                ])),
+          ])),
+    ]);
+
+    // ───────────── Product table ─────────────
+    pw.Widget hc(String t) => pw.Container(
+      padding: const pw.EdgeInsets.symmetric(vertical: 5, horizontal: 2),
+      alignment: pw.Alignment.center,
+      child: pw.Text(t,
+          textAlign: pw.TextAlign.center,
+          style: pw.TextStyle(
+              fontSize: 8.5,
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColors.white)),
+    );
+
+    pw.Widget cc(String t, {bool bold = false}) => pw.Container(
+      padding: const pw.EdgeInsets.symmetric(vertical: 5, horizontal: 2),
+      alignment: pw.Alignment.center,
+      child: pw.Text(t,
+          textAlign: pw.TextAlign.center,
+          style: pw.TextStyle(
+              fontSize: 9,
+              fontWeight:
+              bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+    );
+
+    pw.Widget imgCell(pw.MemoryImage? image, String fallback,
+        {double h = 18}) {
+      if (image == null) return cc(fallback);
+      return pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 2),
+        child: pw.SizedBox(
+            height: h, child: pw.Image(image, fit: pw.BoxFit.contain)),
+      );
+    }
+
+    const int minRows = 10;
+    final int rowCount =
+    nonEmptyRows.length > minRows ? nonEmptyRows.length : minRows;
+
+    pw.TableRow dataRow(int i) {
+      final r = nonEmptyRows[i];
+      final qty = _parseToDouble(r['qty']);
+      final rate = _parseToDouble(r['rate']);
+      final total = _parseToDouble(r['total']);
+      final wpu = _parseToDouble(r['weightPerUnit']);
+      final tw = rowWeight(r);
+      final length = r['length']?.toString() ?? '';
+      final body = r['bodyType']?.toString() ?? '';
+      final desc = (r['description']?.toString() ?? '').trim();
+
+      return pw.TableRow(
+        decoration:
+        pw.BoxDecoration(color: i.isEven ? PdfColors.white : softBg),
+        children: [
+          cc('${i + 1}'),
+          imgCell(sizeImages[sizeOf(r)], sizeOf(r), h: 22),
+          imgCell(lengthImages[length], length, h: 22),
+          imgCell(bodyImages[body], body, h: 22),
+          imgCell(descImages[desc], desc),
+          cc(rate.toStringAsFixed(2)),
+          cc(wpu > 0 ? wpu.toStringAsFixed(2) : '-'),
+          cc(fmtQty(qty)),
+          cc(tw > 0 ? tw.toStringAsFixed(2) : '-'),
+          cc(total.toStringAsFixed(2), bold: true),
+        ],
+      );
+    }
+
+    pw.TableRow emptyRow(int i) => pw.TableRow(
+      decoration:
+      pw.BoxDecoration(color: i.isEven ? PdfColors.white : softBg),
+      children: [
+        cc('${i + 1}'),
+        for (int k = 0; k < 9; k++) cc(''),
+      ],
+    );
+
+    final tableRows = <pw.TableRow>[
+      pw.TableRow(
+        decoration: pw.BoxDecoration(color: orange),
+        children: [
+          hc('No.'),
+          hc('Size'),
+          hc('Length'),
+          hc('Body Type'),
+          hc('Desc.'),
+          hc('Rate\n(PKR)'),
+          hc('Wt/Unit\n(KG)'),
+          hc('Qty'),
+          hc('Tot.Wt\n(KG)'),
+          hc('Amount\n(PKR)'),
+        ],
+      ),
+      for (int i = 0; i < rowCount; i++)
+        i < nonEmptyRows.length ? dataRow(i) : emptyRow(i),
+    ];
+
+    pw.Widget productSection() => pw.Column(children: [
+      sectionHeader('PRODUCT DETAILS'),
+      pw.Table(
+        border: pw.TableBorder(
+          left: pw.BorderSide(color: navy, width: 0.8),
+          right: pw.BorderSide(color: navy, width: 0.8),
+          bottom: pw.BorderSide(color: navy, width: 0.8),
+          horizontalInside: pw.BorderSide(color: softLine, width: 0.4),
+          verticalInside: pw.BorderSide(color: softLine, width: 0.4),
+        ),
+        defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
+        columnWidths: const {
+          0: pw.FlexColumnWidth(0.6),
+          1: pw.FlexColumnWidth(1.8),
+          2: pw.FlexColumnWidth(1.6),
+          3: pw.FlexColumnWidth(1.2),
+          4: pw.FlexColumnWidth(1.4),
+          5: pw.FlexColumnWidth(1.1),
+          6: pw.FlexColumnWidth(1.1),
+          7: pw.FlexColumnWidth(0.8),
+          8: pw.FlexColumnWidth(1.1),
+          9: pw.FlexColumnWidth(1.4),
         },
+        children: tableRows,
+      ),
+    ]);
 
-        // ==================================
-        // ✅ FOOTER (LAST PAGE ONLY)
-        // ==================================
-        footer: (context) {
-          if (context.pageNumber != context.pagesCount) return pw.SizedBox();
+    final noteText = [
+      'Body Type: Full / Half',
+      'Weight and Amount are calculated automatically.',
+      if (_biltiNumberController.text.trim().isNotEmpty)
+        'Bilti #: ${_biltiNumberController.text.trim()}',
+      if (_transportCompanyController.text.trim().isNotEmpty)
+        'Transport: ${_transportCompanyController.text.trim()}',
+    ].join('   |   ');
 
-          return pw.Column(
-            children: [
-              // Footer Note
-              pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.center,
-                children: [
-                  pw.Container(
-                    padding: pw.EdgeInsets.all(12),
-                    decoration: pw.BoxDecoration(
-                      color: PdfColors.orange50,
-                      borderRadius: pw.BorderRadius.circular(8),
-                    ),
-                    child: pw.Column(
-                      children: [
-                        pw.Text(
-                          'Thank you for your business!',
-                          style: pw.TextStyle(
-                            fontSize: 12,
-                            fontWeight: pw.FontWeight.bold,
-                            color: PdfColors.orange800,
-                          ),
-                          textAlign: pw.TextAlign.center,
-                        ),
-                        pw.SizedBox(height: 4),
-                        pw.Text(
-                          'For any queries, please contact us at  03000450050 / 03000450020 or email at mughalgroupofindustrie@gmil.com',
-                          style: pw.TextStyle(
-                            fontSize: 10,
-                            color: PdfColors.grey700,
-                          ),
-                          textAlign: pw.TextAlign.center,
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              pw.Divider(),
+    // ───────────── Summary + Account boxes ─────────────
+    pw.Widget boxTitle(String t) => pw.Row(children: [
+      pw.Container(
+          width: 16,
+          height: 16,
+          decoration: pw.BoxDecoration(
+              color: orange, borderRadius: pw.BorderRadius.circular(3))),
+      pw.SizedBox(width: 8),
+      txt(t, size: 11, bold: true, color: navy),
+    ]);
 
-              pw.Row(
+    pw.Widget framed(pw.Widget child) => pw.Container(
+      height: 122,
+      padding: const pw.EdgeInsets.all(10),
+      decoration: pw.BoxDecoration(
+          border: pw.Border.all(color: softLine, width: 1),
+          borderRadius: pw.BorderRadius.circular(8)),
+      child: child,
+    );
+
+    pw.Widget sumRow(String label, String value,
+        {bool big = false, PdfColor? color, bool bold = false}) =>
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(vertical: 3),
+          child: pw.Row(children: [
+            pw.SizedBox(
+                width: 85, child: txt(label, size: big ? 11 : 10, bold: big)),
+            txt(':   ', size: 10),
+            pw.Expanded(
+                child: txt(value,
+                    size: big ? 15 : 10.5,
+                    bold: big || bold,
+                    color: color)),
+          ]),
+        );
+
+    pw.Widget acctRow(String label, double v) => pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 2.5),
+      child: pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            txt(label, size: 9.5),
+            txt('${v.toStringAsFixed(2)} PKR', size: 9.5),
+          ]),
+    );
+
+    pw.Widget summaryBox() => framed(pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          boxTitle('TOTAL SUMMARY'),
+          pw.SizedBox(height: 6),
+          pw.Expanded(
+            child: pw.Container(
+              width: double.infinity,
+              padding: const pw.EdgeInsets.symmetric(horizontal: 8),
+              color: softBg,
+              child: pw.Column(
+                  mainAxisAlignment: pw.MainAxisAlignment.center,
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    sumRow('Total Quantity', fmtQty(totalQty), bold: true),
+                    sumRow('Total Weight',
+                        '${totalWeight.toStringAsFixed(2)} KG',
+                        bold: true),
+                    if (_discount > 0)
+                      sumRow('Discount', _discount.toStringAsFixed(2)),
+                    if (_mazdoori > 0)
+                      sumRow('Labor Charges', _mazdoori.toStringAsFixed(2)),
+                    sumRow('Grand Total',
+                        '${grandTotal.toStringAsFixed(2)} PKR',
+                        big: true, color: orange),
+                  ]),
+            ),
+          ),
+        ]));
+
+    pw.Widget accountBox() => framed(pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          boxTitle('CUSTOMER ACCOUNT'),
+          pw.SizedBox(height: 6),
+          acctRow('Previous Balance', previousBalance),
+          acctRow('Current Invoice', grandTotal),
+          acctRow('Payment Received', paidAmount),
+          pw.Spacer(),
+          pw.Container(
+            padding:
+            const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: pw.BoxDecoration(
+                color: orange, borderRadius: pw.BorderRadius.circular(4)),
+            child: pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
-                  pw.Column(
-                    children: [
-                      pw.Text(
-                        'Product by: Swittix Technologies',
-                        style: pw.TextStyle(
-                            fontSize: 12, fontWeight: pw.FontWeight.bold),
-                      ),
-                      pw.Text(
-                        'www.swittix.com',
-                        style: pw.TextStyle(
-                            fontSize: 12, fontWeight: pw.FontWeight.bold),
-                      ),
-                    ],
-                  ),
-                  pw.Image(lineImage, width: 150, height: 50),
-
-                  pw.Image(footerLogo, width: 50, height: 40),
-
-                ],
-              ),
-            ],
-          );
-        },
-
-        // ==================================
-        // ✅ BODY CONTENT
-        // ==================================
-        build: (context) => [
-          pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Text('Customer Name: ${selectedCustomer.name}',
-                      style: const pw.TextStyle(fontSize: 11)),
-                  pw.Text('Customer Address: ${selectedCustomer.address}',
-                      style: const pw.TextStyle(fontSize: 11)),
-                  pw.Text('Customer Number: ${selectedCustomer.phone}',
-                      style: const pw.TextStyle(fontSize: 11)),
-                ],
-              ),
-              pw.Column(
-                children: [
-                  pw.Text('Date: $formattedDate $formattedTime',
-                      style: const pw.TextStyle(fontSize: 10)),
-                  pw.Text('Invocie #: ${filledNumber}',
-                      style: const pw.TextStyle(fontSize: 12)),
-                  pw.Text('Bilti Number: ${_biltiNumberController.text}',
-                      style: const pw.TextStyle(fontSize: 11)),
-                  pw.Text(
-                      'Transport Company: ${_transportCompanyController.text}',
-                      style: const pw.TextStyle(fontSize: 11)),
-                ],
-              ),
-            ],
+                  txt('Remaining Balance',
+                      size: 10, bold: true, color: PdfColors.white),
+                  txt('${totalRemainingBalance.toStringAsFixed(2)} PKR',
+                      size: 13, bold: true, color: PdfColors.white),
+                ]),
           ),
-          pw.Divider(),
+        ]));
+
+    // ───────────── PDF page ─────────────
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: pw.EdgeInsets.zero,
+        header: (ctx) =>
+        ctx.pageNumber == 1 ? buildHeader() : pw.SizedBox(height: 18),
+        footer: (ctx) => buildFooter(),
+        build: (ctx) => [
+          pad(titleBanner(), v: 10),
+          pad(pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                infoBox('Invoice No.', filledNumber),
+                infoBox('Date & Time', dateText),
+              ])),
           pw.SizedBox(height: 10),
-          // ✅ Table with all columns from UI
-          pw.Table(
-            border: pw.TableBorder.all(width: 0.5),
-            columnWidths: const {
-              0: pw.FlexColumnWidth(3),  // Item Name
-              1: pw.FlexColumnWidth(2),  // Length
-              2: pw.FlexColumnWidth(1.5), // Body Type
-              3: pw.FlexColumnWidth(2.5), // Description
-              4: pw.FlexColumnWidth(1),  // Qty
-              5: pw.FlexColumnWidth(1.5), // Weight
-              6: pw.FlexColumnWidth(1.5), // Rate
-              7: pw.FlexColumnWidth(1.5), // Total
-            },
-            children: [
-              // Header row
-              pw.TableRow(
-                decoration:
-                const pw.BoxDecoration(color: PdfColors.grey300),
-                children: [
-                  _hcell('Item Name'),
-                  _hcell('Length'),
-                  _hcell('Body Type'),
-                  _hcell('Description'),
-                  _hcell('Qty'),
-                  _hcell('Weight'),
-                  _hcell('Rate'),
-                  _hcell('Total'),
-                ],
-              ),
-
-              // Data rows
-              ...nonEmptyRows.map((r) {
-                // Get weight display text
-                String weightText = '';
-                if (r['calculationType'] == 'weight') {
-                  if (r['totalWeight'] != null && r['totalWeight'] > 0) {
-                    weightText = '${r['totalWeight'].toStringAsFixed(2)} ${r['weightUnit'] ?? 'kg'}';
-                  } else if (r['weightPerUnit'] != null && r['weightPerUnit'] > 0) {
-                    final weight = (r['weightPerUnit'] * (r['qty'] ?? 1)).toStringAsFixed(2);
-                    weightText = '$weight ${r['weightUnit'] ?? 'kg'}';
-                  }
-                }
-
-                // Get calculation type abbreviation
-                String calcType = r['calculationType'] == 'weight' ? 'Wt×Rate' : 'Qty×Rate';
-
-                // return pw.TableRow(children: [
-                //   _cell(r['itemName'] ?? ''),
-                //   _cell(r['length']?.toString() ?? ''),
-                //   _cell(r['bodyType']?.toString() ?? ''),
-                //   _cell(r['description']?.toString() ?? ''),
-                //   _cell((r['qty'] ?? '0').toString()),
-                //   _cell(weightText),
-                //   _cell((r['rate'] ?? 0).toStringAsFixed(2),
-                //       align: pw.Alignment.centerRight),
-                //   _cell((r['total'] ?? 0).toStringAsFixed(2),
-                //       align: pw.Alignment.centerRight),
-                // ]);
-                return pw.TableRow(children: [
-                  imgCell(sizeImages[sizeOf(r)], sizeOf(r)),
-                  imgCell(lengthImages[r['length']?.toString() ?? ''],
-                      r['length']?.toString() ?? ''),
-                  imgCell(bodyImages[r['bodyType']?.toString() ?? ''],
-                      r['bodyType']?.toString() ?? ''),
-                  imgCell(descImages[(r['description']?.toString() ?? '').trim()],
-                      r['description']?.toString() ?? ''),
-                  _cell((r['qty'] ?? '0').toString()),
-                  _cell(weightText),
-                  _cell((r['rate'] ?? 0).toStringAsFixed(2), align: pw.Alignment.centerRight),
-                  _cell((r['total'] ?? 0).toStringAsFixed(2), align: pw.Alignment.centerRight),
-                ]);
-              }),
-
-              // Total row
-              pw.TableRow(
-                decoration:
-                const pw.BoxDecoration(color: PdfColors.grey300),
-                children: [
-                  _hcell('Total'),
-                  _hcell(''),
-                  _hcell(''),
-                  _hcell(''),
-                  _hcell(totalQty.toStringAsFixed(0)),
-                  _hcell(totalWeight.toStringAsFixed(2) + ' kg'),
-                  _hcell(''),
-                  _hcell(_calculateSubtotal().toStringAsFixed(2)),
-                ],
-              ),
-            ],
-          ),
-
-          pw.SizedBox(height: 10),
-
-          _totalRow("Invoice Amount", grandTotal),
-          _totalRow("Previous Balance", previousBalance,
-              highlight: previousBalance > 0),
-          _totalRow("Discount", _discount),
-          _totalRow("Labor Charges", _mazdoori),
-          _totalRow("Total Remaining Balance", totalRemainingBalance,
-              highlight: totalRemainingBalance > 0),
-
-          // Payment information
-          if (paidAmount > 0) ...[
-            pw.SizedBox(height: 10),
-            _totalRow("Paid Amount", paidAmount, highlight: true),
-            _totalRow("Balance Due", remainingAmount, highlight: remainingAmount > 0),
-          ],
-
+          pad(customerSection()),
+          pw.SizedBox(height: 12),
+          pad(productSection()),
+          pw.SizedBox(height: 4),
+          pad(txt(noteText, size: 7.5, color: grey)),
+          pw.SizedBox(height: 8),
+          pad(pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Expanded(child: summaryBox()),
+                pw.SizedBox(width: 12),
+                pw.Expanded(child: accountBox()),
+              ])),
         ],
       ),
     );
 
-    return pdf.save();
+    final bytes = await pdf.save();
+    _lastPdfSignature = signature;
+    _lastPdfBytes = bytes;
+    return bytes;
   }
 
-// Helper methods remain the same
-  pw.Widget _hcell(String t) => pw.Padding(
-    padding: const pw.EdgeInsets.all(4),
-    child: pw.Text(t,
-        style:
-        pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+  /// 1x1 transparent placeholder used only to reserve a map key while the
+  /// real text image is being rendered in parallel.
+  static final pw.MemoryImage _placeholderImage = pw.MemoryImage(
+    base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='),
   );
 
-  pw.Widget _cell(String t,
-      {pw.Alignment align = pw.Alignment.centerLeft}) =>
-      pw.Padding(
-        padding: const pw.EdgeInsets.all(4),
-        child: pw.Align(
-            alignment: align,
-            child: pw.Text(t, style: const pw.TextStyle(fontSize: 10))),
-      );
-
-  pw.Widget _totalRow(String label, double value,
-      {bool highlight = false}) =>
-      pw.Row(
-        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-        children: [
-          pw.Text(label,
-              style:
-              pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
-          pw.Text(value.toStringAsFixed(2),
-              style: pw.TextStyle(
-                  fontSize: 12,
-                  fontWeight: pw.FontWeight.bold,
-                  color: highlight ? PdfColors.red : PdfColors.black)),
-        ],
-      );
-
   Future<void> _generateAndPrintPDF() async {
-    String filledNumber;
-    if (widget.filled != null) {
-      filledNumber = widget.filled!['filledNumber'];
-    } else {
-      final filledProvider = Provider.of<FilledProvider>(context, listen: false);
-      filledNumber = (await filledProvider.getNextFilledNumber()).toString();
+    // Spinner so the user sees immediate feedback
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    Uint8List? bytes;
+    try {
+      String filledNumber;
+      if (widget.filled != null) {
+        filledNumber = widget.filled!['filledNumber'];
+      } else {
+        final filledProvider =
+        Provider.of<FilledProvider>(context, listen: false);
+        filledNumber = (await filledProvider.getNextFilledNumber()).toString();
+      }
+      bytes = await _generatePDFBytes(filledNumber);
+    } catch (e) {
+      print("Error building PDF: $e");
+      rethrow; // caller's try/catch shows the snackbar
+    } finally {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
     }
 
-    try {
-      final bytes = await _generatePDFBytes(filledNumber);
-      await Printing.layoutPdf(onLayout: (format) => bytes);
-    } catch (e) {
-      print("Error printing: $e");
-    }
+    await Printing.layoutPdf(onLayout: (format) async => bytes!);
   }
+
+  /// Swittix logo as SVG for the PDF footer.
+  /// letters = text color (white on the navy footer), blue = brand blue.
+  static String _swittixSvg({
+    String letters = '#FFFFFF',
+    String blue = '#1565FF',
+    String swoosh = '#5B8CFF',
+  })
+  {
+    const tPath =
+        'M1217 120 Q1217 106 1230 92 L1272 50 V170 H1397 L1355 218 H1272 L1270 330 Q1272 362 1290 377 L1360 382 V432 H1320 Q1245 432 1217 380 V218 H1127 L1170 170 H1217 Z';
+
+    return '''
+<svg viewBox="0 0 2378 450" xmlns="http://www.w3.org/2000/svg">
+  <g fill="{{B}}">
+    <rect x="104" y="62" width="25" height="26"/>
+    <rect x="45" y="90" width="33" height="34"/>
+    <rect x="148" y="91" width="30" height="30"/>
+    <rect x="100" y="123" width="40" height="33"/>
+    <rect x="55" y="166" width="43" height="43"/>
+    <path d="M112 210 L128 214 L140 230 L116 226 Z"/>
+  </g>
+  <g fill="{{L}}">
+    <path d="M255 72 H585 L507 153 H270 Q232 153 232 190 Q236 217 262 217 H440 Q540 222 540 300 Q536 345 520 370 Q482 430 425 432 H97 L187 345 L190 362 H412 Q446 355 445 322 Q440 297 425 297 H225 Q150 285 145 225 Q145 175 185 150 L186 105 Q205 80 255 72 Z"/>
+  </g>
+  <polygon points="528,152 600,72 656,72 578,152" fill="{{B}}"/>
+  <path fill="{{L}}" d="M555 177 H628 L706 322 L780 208 L858 322 L935 177 H1002 L862 432 H858 L780 300 L698 432 H694 Z"/>
+  <g fill="{{L}}">
+    <rect x="1033" y="76" width="56" height="62"/>
+    <path d="M1033 215 L1085 172 H1090 V432 H1033 Z"/>
+    <path d="$tPath"/>
+    <g transform="translate(265 0)"><path d="$tPath"/></g>
+    <rect x="1697" y="76" width="58" height="62"/>
+    <path d="M1697 215 L1750 172 H1755 V432 H1697 Z"/>
+  </g>
+  <path fill="{{L}}" d="M1830 197 H1932 L1996 265 L1932 313 L1882 432 H1797 L1930 315 Z"/>
+  <polygon points="1978,365 2050,322 2142,432 2042,432" fill="{{B}}"/>
+  <path d="M1995 265 Q2150 130 2330 78 Q2150 172 2000 272 Z" fill="{{S}}"/>
+  <path d="M1978 362 Q2085 250 2212 175 Q2130 232 2052 322 Z" fill="{{B}}"/>
+</svg>'''
+        .replaceAll('{{L}}', letters)
+        .replaceAll('{{B}}', blue)
+        .replaceAll('{{S}}', swoosh);
+  }
+
+  static final String _swittixSvgString = _swittixSvg();
+
 
   Future<double> _getRemainingBalance(String customerId) async {
     try {
@@ -2116,37 +2522,6 @@ class _filledpageState extends State<filledpage> {
       _items = items;
     });
   }
-
-  // Future<void> _updateQtyOnHand(List<Map<String, dynamic>> validItems) async {
-  //   try {
-  //     for (var item in validItems) {
-  //       final itemName = item['itemName'];
-  //       if (itemName == null || itemName.isEmpty) continue;
-  //
-  //       final dbItem = _items.firstWhere(
-  //             (i) => i.itemName == itemName,
-  //         orElse: () => Item(id: '', itemName: '', costPrice: 0.0, qtyOnHand: 0.0,salePrice: 0.0),
-  //       );
-  //
-  //       if (dbItem.id.isNotEmpty) {
-  //         final String itemId = dbItem.id;
-  //         final double currentQty = dbItem.qtyOnHand ?? 0.0;
-  //         final double newQty = item['qty'] ?? 0.0;
-  //         final double initialQty = item['initialQty'] ?? 0.0;
-  //
-  //         // Calculate the difference between the new quantity and the initial quantity
-  //         double delta = initialQty - newQty;
-  //
-  //         // Update the qtyOnHand in the database
-  //         double updatedQty = currentQty + delta;
-  //
-  //         await _db.child('items/$itemId').update({'qtyOnHand': updatedQty});
-  //       }
-  //     }
-  //   } catch (e) {
-  //     print("Error updating qtyOnHand: $e");
-  //   }
-  // }
 
   Future<void> _updateQtyOnHand(List<Map<String, dynamic>> validItems) async {
     try {
@@ -3107,7 +3482,7 @@ class _filledpageState extends State<filledpage> {
     _fetchItems();
     _initializeReferenceNumber();
     _cleanupTempPDFs(); // ← Added: clean up old temp PDFs on page load
-
+    _ensurePdfAssets();
     _biltiNumberController = TextEditingController();
     _transportCompanyController = TextEditingController();
 
@@ -4295,84 +4670,6 @@ class _filledpageState extends State<filledpage> {
     );
   }
 
-  void _handleWeightInput(int index, String value) {
-    if (value.isEmpty) {
-      setState(() {
-        _filledRows[index]['totalWeight'] = null;
-      });
-      _calculateTotalForRow(index);
-      return;
-    }
-
-    // Parse weight value and unit
-    final parts = value.trim().split(' ');
-    double? weightValue;
-    String weightUnit = _filledRows[index]['weightUnit'] ?? 'kg'; // Use existing unit as default
-
-    if (parts.isNotEmpty) {
-      weightValue = double.tryParse(parts[0]);
-
-      // Try to extract unit if provided
-      if (parts.length > 1) {
-        final unit = parts.sublist(1).join(' ').toLowerCase();
-        if (unit.contains('kg') || unit.contains('kilogram')) {
-          weightUnit = 'kg';
-        } else if (unit.contains('g') || unit.contains('gram')) {
-          weightUnit = 'g';
-        } else if (unit.contains('lb') || unit.contains('pound')) {
-          weightUnit = 'lb';
-        } else if (unit.contains('ton')) {
-          weightUnit = 'ton';
-        }
-      }
-    }
-
-    if (weightValue != null && weightValue > 0) {
-      setState(() {
-        _filledRows[index]['totalWeight'] = weightValue;
-        _filledRows[index]['weightUnit'] = weightUnit;
-
-        // Mark as manually entered weight
-        _filledRows[index]['manualWeightEntry'] = true;
-
-        // Automatically switch to weight calculation when weight is manually entered
-        _filledRows[index]['calculationType'] = 'weight';
-      });
-
-      _calculateTotalForRow(index);
-    }
-  }
-
-  Map<String, String> _parseBOMName(String bomName) {
-    Map<String, String> result = {
-      'size': '',
-      'length': '',
-      'bodyType': '',
-      'fullName': bomName
-    };
-
-    if (bomName.contains('|')) {
-      final parts = bomName.split('|').map((part) => part.trim()).toList();
-
-      if (parts.length >= 3) {
-        result['size'] = parts[0];
-        result['length'] = parts[1];
-        result['bodyType'] = parts[2];
-      } else if (parts.length == 2) {
-        result['size'] = parts[0];
-        result['length'] = parts[1];
-      } else if (parts.length == 1) {
-        result['size'] = parts[0];
-      }
-    } else {
-      result['size'] = bomName;
-    }
-
-    return result;
-  }
-
-
-
   void _addItemToRow(Item item, int rowIndex, LengthBodyCombination? combination) {
     final customerPrice = item.getPriceForCustomer(_selectedCustomerId);
     double? salePricePerKg = combination?.salePricePerKg;
@@ -4510,7 +4807,6 @@ class _filledpageState extends State<filledpage> {
       _calculateTotalForRow(rowIndex);
     });
   }
-
 
   Widget _buildPaymentSection(BuildContext context, LanguageProvider languageProvider) {
     final _formKey = GlobalKey<FormState>();

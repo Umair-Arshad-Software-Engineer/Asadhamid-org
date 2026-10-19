@@ -17,7 +17,7 @@ import 'package:printing/printing.dart';
 import 'dart:js_interop';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
-
+import 'pdf_branding.dart'; // adjust the path to where you saved it
 
 @JS('copyPngToClipboard')
 external JSPromise<JSBoolean> _copyPngToClipboardJs(JSString base64Png);
@@ -65,7 +65,22 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
   List<Map<String, dynamic>> _bomComponents = [];
   Map<String, double> _wastageRecords = {};
 
+  // ── PDF / PNG caches (reused while nothing changes) ──
+  static String? _lastPdfSig;
+  static Uint8List? _lastPdfBytes;
+  static String? _lastPngSig;
+  static Uint8List? _lastPngBytes;
 
+  String _vendorPhone() {
+    String phone = _selectedVendor?['phone']?.toString() ?? '';
+    if (phone.isEmpty) {
+      final v = _vendors.firstWhere(
+              (v) => v['key'] == _selectedVendor?['key'],
+          orElse: () => {});
+      phone = v['phone']?.toString() ?? '';
+    }
+    return phone;
+  }
 
 
   String? _normalizePkNumber(String raw) {
@@ -201,10 +216,20 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
     Uint8List? pngBytes;
     try {
       pdfBytes = await _generatePdf(context);
-      await for (final page
-      in Printing.raster(pdfBytes, pages: [0], dpi: 144)) {
-        pngBytes = await page.toPng();
-        break;
+
+      final sig = _lastPdfSig;
+      if (sig != null && _lastPngSig == sig && _lastPngBytes != null) {
+        pngBytes = _lastPngBytes; // same purchase as before, reuse the image
+      } else {
+        await for (final page
+        in Printing.raster(pdfBytes, pages: [0], dpi: 110)) {
+          pngBytes = await page.toPng();
+          break;
+        }
+        if (pngBytes != null) {
+          _lastPngSig = sig;
+          _lastPngBytes = pngBytes;
+        }
       }
     } catch (e) {
       print('Purchase invoice build failed: $e');
@@ -300,6 +325,7 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
   @override
   void initState() {
     super.initState();
+    PdfBranding.ensureAssets(); // pre-load the logo so the first print is fast
     _selectedDateTime = DateTime.now();
     _vendorSearchController = TextEditingController();
     _refNoController = TextEditingController();
@@ -1014,10 +1040,9 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
   );
 
   Future<Uint8List> _generatePdf(BuildContext context) async {
-    final languageProvider =
-    Provider.of<LanguageProvider>(context, listen: false);
+    await PdfBranding.ensureAssets();
+
     final total = calculateTotal();
-    final dateFormat = DateFormat('yyyy-MM-dd HH:mm');
 
     final validItems = _purchaseItems
         .where((item) =>
@@ -1026,320 +1051,304 @@ class _ItemPurchasePageState extends State<ItemPurchasePage> {
         item.priceController.text.isNotEmpty)
         .toList();
 
-    final Map<String, Uint8List> sizeImages = {};
-    final Map<String, Uint8List> lengthImages = {};
-    final Map<String, Uint8List> bodyImages = {};
-    final Map<String, Uint8List> descImages = {};
+    double d(TextEditingController c) => double.tryParse(c.text) ?? 0.0;
 
-    for (final item in validItems) {
-      final size = item.itemNameController.text;
-      if (size.isNotEmpty && !sizeImages.containsKey(size)) {
-        sizeImages[size] = await _renderTextAsImage(size,
-            fontSize: 11, width: 130, height: 20);
+    String descOf(PurchaseItem it) {
+      String desc = it.descriptionController.text.trim();
+      if (desc.isEmpty && it.selectedItem != null) {
+        desc = it.selectedItem!['description']?.toString() ?? '';
       }
-      final length = item.lengthController.text;
-      if (length.isNotEmpty && !lengthImages.containsKey(length)) {
-        lengthImages[length] = await _renderTextAsImage(length,
-            fontSize: 11, width: 70, height: 20);
-      }
-      final body = item.bodyTypeController.text;
-      if (body.isNotEmpty && !bodyImages.containsKey(body)) {
-        bodyImages[body] = await _renderTextAsImage(body,
-            fontSize: 11, width: 80, height: 20);
-      }
-      String desc = item.descriptionController.text.trim();
-      if (desc.isEmpty && item.selectedItem != null) {
-        desc = item.selectedItem!['description']?.toString() ?? '';
-      }
-      if (desc.isNotEmpty && !descImages.containsKey(desc)) {
-        descImages[desc] = await _renderTextAsImage(desc,
-            fontSize: 11, width: 110, height: 18);
-      }
+      return desc;
     }
 
-    final pdf = pw.Document();
+    final vendorName = _selectedVendor?['name']?.toString() ?? '';
+    final vendorPhone = _vendorPhone();
+    final refNo = _refNoController.text.trim();
+    final title = widget.isFromPurchaseOrder
+        ? 'PURCHASE RECEIPT'
+        : 'PURCHASE INVOICE';
 
-    pdf.addPage(
-      pw.Page(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(20),
-        build: (pw.Context ctx) {
-          const colWidths = {
-            0: pw.FixedColumnWidth(22),
-            1: pw.FlexColumnWidth(2.0),
-            2: pw.FlexColumnWidth(1.3),
-            3: pw.FlexColumnWidth(1.3),
-            4: pw.FlexColumnWidth(1.8),
-            5: pw.FlexColumnWidth(1.1),
-            6: pw.FlexColumnWidth(1.0),
-            7: pw.FlexColumnWidth(0.8),
-            8: pw.FlexColumnWidth(1.2),
-            9: pw.FlexColumnWidth(1.2),
-          };
+    String two(int n) => n.toString().padLeft(2, '0');
+    final dt = _selectedDateTime;
+    final dateText = '${dt.year}-${two(dt.month)}-${two(dt.day)} '
+        '${two(dt.hour)}:${two(dt.minute)}';
 
-          return pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Row(
+    final totalQty =
+    validItems.fold<double>(0, (s, it) => s + d(it.quantityController));
+    final totalWeight = validItems.fold<double>(
+        0, (s, it) => s + d(it.quantityController) * d(it.weightController));
+
+    String fmtQty(double q) =>
+        q % 1 == 0 ? q.toInt().toString() : q.toStringAsFixed(2);
+
+    // ───────────── Whole-PDF cache ─────────────
+    final signature = jsonEncode([
+      title,
+      vendorName,
+      vendorPhone,
+      refNo,
+      dateText,
+      total,
+      validItems
+          .map((it) => [
+        it.itemNameController.text,
+        it.lengthController.text,
+        it.bodyTypeController.text,
+        descOf(it),
+        it.quantityController.text,
+        it.weightController.text,
+        it.priceController.text,
+      ])
+          .toList(),
+    ]);
+
+    if (_lastPdfSig == signature && _lastPdfBytes != null) {
+      return _lastPdfBytes!;
+    }
+
+    // ───────────── Urdu-safe text images (only when needed, cached) ─────────────
+    final Map<String, pw.MemoryImage> sizeImages = {};
+    final Map<String, pw.MemoryImage> lengthImages = {};
+    final Map<String, pw.MemoryImage> bodyImages = {};
+    final Map<String, pw.MemoryImage> descImages = {};
+    final jobs = <Future<void>>[];
+
+    void queue(Map<String, pw.MemoryImage> target, String text,
+        double fontSize, double w, double h) {
+      if (!PdfBranding.needsImage(text) || target.containsKey(text)) return;
+      jobs.add(PdfBranding.textImage(text,
+          fontSize: fontSize, width: w, height: h)
+          .then((img) => target[text] = img));
+    }
+
+    for (final it in validItems) {
+      queue(sizeImages, it.itemNameController.text.trim(), 42, 228, 66);
+      queue(lengthImages, it.lengthController.text.trim(), 42, 201, 66);
+      queue(bodyImages, it.bodyTypeController.text.trim(), 42, 144, 66);
+      queue(descImages, descOf(it), 11, 110, 20);
+    }
+
+    pw.MemoryImage? vendorImg;
+    if (PdfBranding.needsImage(vendorName)) {
+      jobs.add(PdfBranding.textImage(vendorName,
+          fontSize: 42, width: 165 * 3, height: 66)
+          .then((img) => vendorImg = img));
+    }
+    await Future.wait(jobs);
+
+    // ───────────── Customer-style section: vendor details ─────────────
+    pw.Widget vendorSection() => pw.Column(children: [
+      PdfBranding.sectionHeader('VENDOR DETAILS'),
+      PdfBranding.sectionBody(pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Expanded(
+                child: pw.Column(children: [
+                  PdfBranding.field('Vendor Name',
+                      img: vendorImg, text: vendorName),
+                  PdfBranding.field('Reference No', text: refNo),
+                ])),
+            pw.SizedBox(width: 18),
+            pw.Expanded(
+                child: pw.Column(children: [
+                  PdfBranding.field('Phone Number', text: vendorPhone),
+                  PdfBranding.field('Total Items',
+                      text: '${validItems.length}'),
+                ])),
+          ])),
+    ]);
+
+    // ───────────── Product table ─────────────
+    const int minRows = 10;
+    final int rowCount =
+    validItems.length > minRows ? validItems.length : minRows;
+
+    pw.TableRow dataRow(int i) {
+      final it = validItems[i];
+      final name = it.itemNameController.text.trim();
+      final length = it.lengthController.text.trim();
+      final body = it.bodyTypeController.text.trim();
+      final desc = descOf(it);
+      final qty = d(it.quantityController);
+      final wpu = d(it.weightController);
+      final rate = d(it.priceController);
+      final tw = wpu * qty;
+      final amount = calculateItemTotal(it);
+
+      return pw.TableRow(
+        decoration: pw.BoxDecoration(
+            color: i.isEven ? PdfColors.white : PdfBranding.softBg),
+        children: [
+          PdfBranding.cell('${i + 1}'),
+          PdfBranding.imgCell(sizeImages[name], name, h: 22),
+          PdfBranding.imgCell(lengthImages[length], length, h: 22),
+          PdfBranding.imgCell(bodyImages[body], body, h: 22),
+          PdfBranding.imgCell(descImages[desc], desc),
+          PdfBranding.cell(rate.toStringAsFixed(2)),
+          PdfBranding.cell(wpu > 0 ? wpu.toStringAsFixed(2) : '-'),
+          PdfBranding.cell(fmtQty(qty)),
+          PdfBranding.cell(tw > 0 ? tw.toStringAsFixed(2) : '-'),
+          PdfBranding.cell(amount.toStringAsFixed(2), bold: true),
+        ],
+      );
+    }
+
+    pw.TableRow emptyRow(int i) => pw.TableRow(
+      decoration: pw.BoxDecoration(
+          color: i.isEven ? PdfColors.white : PdfBranding.softBg),
+      children: [
+        PdfBranding.cell('${i + 1}'),
+        for (int k = 0; k < 9; k++) PdfBranding.cell(''),
+      ],
+    );
+
+    final tableRows = <pw.TableRow>[
+      pw.TableRow(
+        decoration: pw.BoxDecoration(color: PdfBranding.orange),
+        children: [
+          PdfBranding.headCell('No.'),
+          PdfBranding.headCell('Size'),
+          PdfBranding.headCell('Length'),
+          PdfBranding.headCell('Body Type'),
+          PdfBranding.headCell('Desc.'),
+          PdfBranding.headCell('Rate\n(PKR/KG)'),
+          PdfBranding.headCell('Wt/Unit\n(KG)'),
+          PdfBranding.headCell('Qty'),
+          PdfBranding.headCell('Tot.Wt\n(KG)'),
+          PdfBranding.headCell('Amount\n(PKR)'),
+        ],
+      ),
+      for (int i = 0; i < rowCount; i++)
+        i < validItems.length ? dataRow(i) : emptyRow(i),
+    ];
+
+    pw.Widget productSection() => pw.Column(children: [
+      PdfBranding.sectionHeader('PURCHASED ITEMS'),
+      pw.Table(
+        border: pw.TableBorder(
+          left: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+          right: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+          bottom: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+          horizontalInside:
+          pw.BorderSide(color: PdfBranding.softLine, width: 0.4),
+          verticalInside:
+          pw.BorderSide(color: PdfBranding.softLine, width: 0.4),
+        ),
+        defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
+        columnWidths: const {
+          0: pw.FlexColumnWidth(0.6),
+          1: pw.FlexColumnWidth(1.8),
+          2: pw.FlexColumnWidth(1.6),
+          3: pw.FlexColumnWidth(1.2),
+          4: pw.FlexColumnWidth(1.4),
+          5: pw.FlexColumnWidth(1.1),
+          6: pw.FlexColumnWidth(1.1),
+          7: pw.FlexColumnWidth(0.8),
+          8: pw.FlexColumnWidth(1.1),
+          9: pw.FlexColumnWidth(1.4),
+        },
+        children: tableRows,
+      ),
+    ]);
+
+    // ───────────── Summary + payable boxes ─────────────
+    pw.Widget summaryBox() => PdfBranding.framed(pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          PdfBranding.boxTitle('TOTAL SUMMARY'),
+          pw.SizedBox(height: 6),
+          pw.Expanded(
+            child: pw.Container(
+              width: double.infinity,
+              padding: const pw.EdgeInsets.symmetric(horizontal: 8),
+              color: PdfBranding.softBg,
+              child: pw.Column(
+                  mainAxisAlignment: pw.MainAxisAlignment.center,
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    PdfBranding.sumRow('Total Items', '${validItems.length}',
+                        bold: true),
+                    PdfBranding.sumRow('Total Quantity', fmtQty(totalQty),
+                        bold: true),
+                    PdfBranding.sumRow('Total Weight',
+                        '${totalWeight.toStringAsFixed(2)} KG',
+                        bold: true),
+                  ]),
+            ),
+          ),
+        ]));
+
+    pw.Widget payableBox() => PdfBranding.framed(pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          PdfBranding.boxTitle('PAYMENT SUMMARY'),
+          pw.SizedBox(height: 6),
+          PdfBranding.acctRow(
+              'Purchase Amount', '${total.toStringAsFixed(2)} PKR'),
+          PdfBranding.acctRow('Vendor', vendorName.isEmpty ? '-' : vendorName),
+          pw.Spacer(),
+          pw.Container(
+            padding:
+            const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: pw.BoxDecoration(
+                color: PdfBranding.orange,
+                borderRadius: pw.BorderRadius.circular(4)),
+            child: pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
-                  pw.Text(
-                    widget.isFromPurchaseOrder
-                        ? (languageProvider.isEnglish
-                        ? 'Purchase Receipt'
-                        : 'Receipt')
-                        : (languageProvider.isEnglish
-                        ? 'Purchase Invoice'
-                        : 'Invoice'),
-                    style: pw.TextStyle(
-                      fontSize: 18,
-                      fontWeight: pw.FontWeight.bold,
-                      color: PdfColor.fromHex('#E65100'),
-                    ),
-                  ),
-                  pw.Column(
-                    crossAxisAlignment: pw.CrossAxisAlignment.end,
-                    children: [
-                      pw.Text(
-                        'Date: ${dateFormat.format(_selectedDateTime)}',
-                        style: const pw.TextStyle(
-                            fontSize: 9, color: PdfColors.grey600),
-                      ),
-                      if (_refNoController.text.isNotEmpty)
-                        pw.Text(
-                          'Ref: ${_refNoController.text}',
-                          style: const pw.TextStyle(
-                              fontSize: 9, color: PdfColors.grey600),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-              pw.SizedBox(height: 4),
-              pw.Row(children: [
-                pw.Text('Vendor: ',
-                    style: pw.TextStyle(
-                        fontWeight: pw.FontWeight.bold, fontSize: 10)),
-                pw.Text(_selectedVendor?['name'] ?? '',
-                    style: const pw.TextStyle(fontSize: 10)),
-              ]),
-              pw.SizedBox(height: 10),
-              pw.Divider(
-                  color: PdfColor.fromHex('#FF8A65'), thickness: 1.5),
-              pw.SizedBox(height: 8),
-              pw.Table(
-                border: pw.TableBorder.all(
-                    color: PdfColors.grey300, width: 0.5),
-                columnWidths: colWidths,
-                children: [
-                  pw.TableRow(
-                    decoration: pw.BoxDecoration(
-                        color: PdfColor.fromHex('#FF8A65')),
-                    children: [
-                      _pdfHeader('No.'),
-                      _pdfHeader('Size'),
-                      _pdfHeader('Length'),
-                      _pdfHeader('Body'),
-                      _pdfHeader('Desc.'),
-                      _pdfHeader('Rate'),
-                      _pdfHeader('Wt/Unit'),
-                      _pdfHeader('Qty'),
-                      _pdfHeader('Tot.Wt'),
-                      _pdfHeader('Amount'),
-                    ],
-                  ),
-                  ...validItems.asMap().entries.map((entry) {
-                    final i = entry.key;
-                    final item = entry.value;
-                    final qty =
-                        double.tryParse(item.quantityController.text) ??
-                            0.0;
-                    final wtPerUnit =
-                        double.tryParse(item.weightController.text) ?? 0.0;
-                    final rate =
-                        double.tryParse(item.priceController.text) ?? 0.0;
-                    final totalWt = wtPerUnit * qty;
-                    final itemTotal = calculateItemTotal(item);
+                  PdfBranding.txt('Grand Total',
+                      size: 10, bold: true, color: PdfColors.white),
+                  PdfBranding.txt('${total.toStringAsFixed(2)} PKR',
+                      size: 13, bold: true, color: PdfColors.white),
+                ]),
+          ),
+        ]));
 
-                    String desc = item.descriptionController.text.trim();
-                    if (desc.isEmpty && item.selectedItem != null) {
-                      desc = item.selectedItem!['description']
-                          ?.toString() ??
-                          '';
-                    }
-
-                    final bgColor =
-                    i % 2 == 0 ? PdfColors.white : PdfColors.grey50;
-
-                    pw.Widget imgCell(
-                        Uint8List? bytes, String fallback) {
-                      if (bytes != null) {
-                        return pw.Padding(
-                          padding: const pw.EdgeInsets.symmetric(
-                              horizontal: 3, vertical: 2),
-                          child: pw.SizedBox(
-                            height: 20,
-                            child: pw.Image(pw.MemoryImage(bytes),
-                                fit: pw.BoxFit.contain),
-                          ),
-                        );
-                      }
-                      return _pdfCell(fallback);
-                    }
-
-                    return pw.TableRow(
-                      decoration: pw.BoxDecoration(color: bgColor),
-                      children: [
-                        _pdfCell('${i + 1}', center: true),
-                        imgCell(sizeImages[item.itemNameController.text],
-                            item.itemNameController.text),
-                        imgCell(lengthImages[item.lengthController.text],
-                            item.lengthController.text),
-                        imgCell(bodyImages[item.bodyTypeController.text],
-                            item.bodyTypeController.text),
-                        imgCell(descImages[desc], desc),
-                        _pdfCell(rate.toStringAsFixed(2), center: true),
-                        _pdfCell(wtPerUnit.toStringAsFixed(2),
-                            center: true),
-                        _pdfCell(qty.toStringAsFixed(2), center: true),
-                        _pdfCell('${totalWt.toStringAsFixed(2)}kg',
-                            center: true),
-                        _pdfCell(itemTotal.toStringAsFixed(2),
-                            center: true, bold: true),
-                      ],
-                    );
-                  }).toList(),
-                  pw.TableRow(
-                    decoration: const pw.BoxDecoration(
-                        color: PdfColors.grey200),
-                    children: [
-                      _pdfCell(''),
-                      _pdfCell('TOTAL', bold: true),
-                      _pdfCell(''),
-                      _pdfCell(''),
-                      _pdfCell(''),
-                      _pdfCell(''),
-                      _pdfCell(''),
-                      _pdfCell(
-                        validItems
-                            .fold<double>(
-                            0,
-                                (s, it) =>
-                            s +
-                                (double.tryParse(
-                                    it.quantityController.text) ??
-                                    0))
-                            .toStringAsFixed(0),
-                        center: true,
-                        bold: true,
-                      ),
-                      _pdfCell(
-                        '${validItems.fold<double>(0, (s, it) {
-                          final q = double.tryParse(
-                              it.quantityController.text) ??
-                              0;
-                          final w =
-                              double.tryParse(it.weightController.text) ??
-                                  0;
-                          return s + q * w;
-                        }).toStringAsFixed(2)}kg',
-                        center: true,
-                        bold: true,
-                      ),
-                      _pdfCell(total.toStringAsFixed(2),
-                          center: true, bold: true),
-                    ],
-                  ),
-                ],
-              ),
-              pw.SizedBox(height: 16),
-              pw.Align(
-                alignment: pw.Alignment.centerRight,
-                child: pw.Container(
-                  padding: const pw.EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 8),
-                  decoration: pw.BoxDecoration(
-                    color: PdfColor.fromHex('#FFF3E0'),
-                    border: pw.Border.all(
-                        color: PdfColor.fromHex('#FF8A65')),
-                    borderRadius: const pw.BorderRadius.all(
-                        pw.Radius.circular(4)),
-                  ),
-                  child: pw.Text(
-                    'Grand Total: ${total.toStringAsFixed(2)} PKR',
-                    style: pw.TextStyle(
-                      fontSize: 12,
-                      fontWeight: pw.FontWeight.bold,
-                      color: PdfColor.fromHex('#E65100'),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
+    // ───────────── PDF page ─────────────
+    final pdf = pw.Document();
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: pw.EdgeInsets.zero,
+        header: (ctx) =>
+        ctx.pageNumber == 1 ? PdfBranding.header() : pw.SizedBox(height: 18),
+        footer: (ctx) => PdfBranding.footer(),
+        build: (ctx) => [
+          PdfBranding.pad(PdfBranding.titleBanner(title), v: 10),
+          PdfBranding.pad(pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                PdfBranding.infoBox(
+                    'Reference No.', refNo.isEmpty ? '-' : refNo),
+                PdfBranding.infoBox('Date & Time', dateText),
+              ])),
+          pw.SizedBox(height: 10),
+          PdfBranding.pad(vendorSection()),
+          pw.SizedBox(height: 12),
+          PdfBranding.pad(productSection()),
+          pw.SizedBox(height: 4),
+          PdfBranding.pad(PdfBranding.txt(
+              'Weight and Amount are calculated automatically.',
+              size: 7.5,
+              color: PdfBranding.grey)),
+          pw.SizedBox(height: 8),
+          PdfBranding.pad(pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Expanded(child: summaryBox()),
+                pw.SizedBox(width: 12),
+                pw.Expanded(child: payableBox()),
+              ])),
+        ],
       ),
     );
 
-    return pdf.save();
+    final bytes = await pdf.save();
+    _lastPdfSig = signature;
+    _lastPdfBytes = bytes;
+    return bytes;
   }
 
-  pw.Widget _pdfHeader(String text) => pw.Padding(
-    padding:
-    const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
-    child: pw.Text(
-      text,
-      style: pw.TextStyle(
-          fontSize: 8,
-          fontWeight: pw.FontWeight.bold,
-          color: PdfColors.white),
-      textAlign: pw.TextAlign.center,
-    ),
-  );
-
-  pw.Widget _pdfCell(String text,
-      {bool center = false, bool bold = false}) =>
-      pw.Padding(
-        padding:
-        const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-        child: pw.Text(
-          text,
-          style: pw.TextStyle(
-              fontSize: 8,
-              fontWeight:
-              bold ? pw.FontWeight.bold : pw.FontWeight.normal),
-          textAlign: center ? pw.TextAlign.center : pw.TextAlign.left,
-        ),
-      );
-
-  Future<Uint8List> _renderTextAsImage(
-      String text, {
-        double fontSize = 10,
-        double width = 100,
-        double height = 20,
-      }) async {
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final bgPaint = Paint()..color = const Color(0xFFFFFFFF);
-    canvas.drawRect(Rect.fromLTWH(0, 0, width, height), bgPaint);
-    final textPainter = TextPainter(
-      text: TextSpan(
-        text: text,
-        style:
-        TextStyle(color: const Color(0xFF000000), fontSize: fontSize),
-      ),
-      textDirection: ui.TextDirection.ltr,
-      maxLines: 1,
-    );
-    textPainter.layout(maxWidth: width - 4);
-    textPainter.paint(
-        canvas, Offset(2, (height - textPainter.height) / 2));
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(width.toInt(), height.toInt());
-    final byteData =
-    await img.toByteData(format: ui.ImageByteFormat.png);
-    return byteData!.buffer.asUint8List();
-  }
 
   // ── Inventory helpers ─────────────────────────────────────────────────────
 

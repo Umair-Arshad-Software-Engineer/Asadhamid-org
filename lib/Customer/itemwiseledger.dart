@@ -1,8 +1,9 @@
 // items_wise_ledger_page.dart
-import 'dart:typed_data';
-import 'dart:ui' as ui;
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data' show Uint8List;
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
@@ -13,6 +14,22 @@ import '../Provider/lanprovider.dart';
 import '../bankmanagement/banknames.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:universal_html/html.dart' as html;
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:js_interop';
+
+// Shared Mughal Group PDF design — same one used by ItemPurchasePage
+// and FilledLedgerReportPage.
+import '../Purchase/pdf_branding.dart';
+
+// Web-only clipboard helpers (same as ItemPurchasePage)
+@JS('copyPngToClipboard')
+external JSPromise<JSBoolean> _copyPngToClipboardJs(JSString base64Png);
+
+@JS('sharePngWithText')
+external JSPromise<JSBoolean> _sharePngWithTextJs(
+    JSString base64Png, JSString text, JSString fileName);
 
 class ItemsWiseLedgerReportPage extends StatefulWidget {
   final String customerId;
@@ -68,46 +85,697 @@ class _ItemsWiseLedgerReportPageState
     return _bankIconMap[key];
   }
 
-  // ── High-resolution text-to-image renderer (3× scale for crisp PDF output) ──
-  Future<Uint8List> _renderTextAsImageForPdf(
-      String text, {
-        double fontSize = 9,
-        double width = 80,
-        double height = 20,
-      }) async {
-    const double scale = 3.0;
-    final double scaledWidth = width * scale;
-    final double scaledHeight = height * scale;
+  // ═══════════════════════════════════════════════════════════════════
+  // WhatsApp sharing helpers (same shape as FilledLedgerReportPage)
+  // ═══════════════════════════════════════════════════════════════════
 
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    canvas.scale(scale, scale);
-
-    final bgPaint = Paint()..color = const Color(0xFFFFFFFF);
-    canvas.drawRect(Rect.fromLTWH(0, 0, width, height), bgPaint);
-
-    final textPainter = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          color: const Color(0xFF000000),
-          fontSize: fontSize,
-          decoration: TextDecoration.none,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
-      textDirection: ui.TextDirection.ltr,
-      maxLines: 1,
-    );
-    textPainter.layout(maxWidth: width - 4);
-    textPainter.paint(canvas, Offset(2, (height - textPainter.height) / 2));
-
-    final picture = recorder.endRecording();
-    final img =
-    await picture.toImage(scaledWidth.toInt(), scaledHeight.toInt());
-    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-    return byteData!.buffer.asUint8List();
+  String? _normalizePkNumber(String raw) {
+    if (raw.trim().isEmpty) return null;
+    var n = raw.replaceAll(RegExp(r'[^0-9+]'), '');
+    if (n.startsWith('+')) n = n.substring(1);
+    if (n.startsWith('00')) n = n.substring(2);
+    if (n.startsWith('0')) n = '92${n.substring(1)}';
+    if (n.startsWith('92') && n.length == 12) return n;
+    return null;
   }
+
+  Future<bool> _isWhatsAppAvailable(String number) async {
+    if (kIsWeb) return true;
+    try {
+      return await canLaunchUrl(Uri.parse('whatsapp://send?phone=$number'));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _copyImageToClipboard(Uint8List png) async {
+    if (!kIsWeb) return false;
+    try {
+      final r = await _copyPngToClipboardJs(base64Encode(png).toJS).toDart;
+      return r.toDart;
+    } catch (e) {
+      debugPrint('Clipboard copy failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _shareImageWithText(
+      Uint8List png, String text, String fileName) async {
+    if (kIsWeb) {
+      try {
+        final r = await _sharePngWithTextJs(
+            base64Encode(png).toJS, text.toJS, fileName.toJS)
+            .toDart;
+        return r.toDart;
+      } catch (e) {
+        debugPrint('Web share failed: $e');
+        return false;
+      }
+    }
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(png);
+      await Share.shareXFiles([XFile(file.path)], text: text);
+      return true;
+    } catch (e) {
+      debugPrint('Share failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _sendWhatsAppTextOnly(String number, String message) async {
+    final link =
+        'whatsapp://send?phone=$number&text=${Uri.encodeComponent(message)}';
+    if (kIsWeb) {
+      final a = html.AnchorElement(href: link)
+        ..target = '_self'
+        ..style.display = 'none';
+      html.document.body?.append(a);
+      a.click();
+      a.remove();
+    } else {
+      await launchUrl(Uri.parse(link),
+          mode: LaunchMode.externalApplication);
+    }
+  }
+
+  Future<void> _sharePDFOnWhatsApp(
+      ItemsWiseLedgerProvider provider,
+      LanguageProvider languageProvider,
+      ) async {
+    final number = _normalizePkNumber(widget.customerPhone);
+    if (number == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(languageProvider.isEnglish
+              ? 'No valid WhatsApp number on file for this customer.'
+              : 'اس کسٹمر کا درست واٹس ایپ نمبر موجود نہیں۔'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+    if (!await _isWhatsAppAvailable(number)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(languageProvider.isEnglish
+              ? 'WhatsApp is not available on this device.'
+              : 'اس ڈیوائس پر واٹس ایپ دستیاب نہیں۔'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final pdf = await _buildItemsWisePdf(provider, languageProvider);
+    if (pdf == null) return;
+    final bytes = await pdf.save();
+
+    Uint8List? pngBytes;
+    try {
+      await for (final page in Printing.raster(bytes, pages: [0], dpi: 110)) {
+        pngBytes = await page.toPng();
+        break;
+      }
+    } catch (e) {
+      debugPrint('Raster failed: $e');
+    }
+
+    final closing = provider.report['balance']?.toDouble() ?? 0.0;
+    final periodText = provider.isFiltered && provider.dateRangeFilter != null
+        ? '${DateFormat('dd MMM yy').format(provider.dateRangeFilter!.start)}'
+        ' – '
+        '${DateFormat('dd MMM yy').format(provider.dateRangeFilter!.end)}'
+        : 'All Transactions';
+
+    final message = 'Assalam o Alaikum ${widget.customerName},\n'
+        'Aap ka items-wise ledger statement attached hai.\n'
+        'Period: $periodText\n'
+        'Closing Balance: Rs ${closing.toStringAsFixed(2)}\n'
+        '${DateFormat('dd/MM/yyyy').format(DateTime.now())}\n'
+        'Mughal Group of Industries';
+
+    final safeName =
+    widget.customerName.replaceAll(RegExp(r'[^A-Za-z0-9]'), '_');
+    final stamp = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
+    final fileBase = 'ItemsWise_Ledger_${safeName}_$stamp';
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(languageProvider.isEnglish
+            ? 'Send on WhatsApp'
+            : 'واٹس ایپ پر بھیجیں'),
+        content: Text(languageProvider.isEnglish
+            ? 'How would you like to send this items-wise statement to '
+            '${widget.customerName} (${widget.customerPhone})?'
+            : '${widget.customerName} (${widget.customerPhone}) کو یہ آئٹم وار اسٹیٹمنٹ کیسے بھیجیں؟'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(languageProvider.isEnglish ? 'Cancel' : 'منسوخ'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.message, size: 18),
+            label: Text(languageProvider.isEnglish ? 'Text' : 'پیغام'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _sendWhatsAppTextOnly(number, message);
+            },
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.picture_as_pdf, size: 18),
+            label: Text(languageProvider.isEnglish ? 'PDF file' : 'پی ڈی ایف'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await Printing.sharePdf(
+                bytes: bytes,
+                filename: '$fileBase.pdf',
+              );
+            },
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.image, size: 18),
+            label: Text(languageProvider.isEnglish
+                ? 'Image + Message'
+                : 'تصویر + پیغام'),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white),
+            onPressed: pngBytes == null
+                ? null
+                : () async {
+              Navigator.pop(ctx);
+              if (kIsWeb) {
+                final copied =
+                await _copyImageToClipboard(pngBytes!);
+                await _sendWhatsAppTextOnly(number, message);
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(copied
+                        ? (languageProvider.isEnglish
+                        ? 'Image copied. Press Ctrl+V in the chat.'
+                        : 'تصویر کاپی ہو گئی۔ چیٹ میں Ctrl+V دبائیں۔')
+                        : (languageProvider.isEnglish
+                        ? 'Could not copy the image. Use PDF file option.'
+                        : 'تصویر کاپی نہیں ہو سکی۔ پی ڈی ایف آپشن استعمال کریں۔')),
+                  ),
+                );
+              } else {
+                final ok = await _shareImageWithText(
+                    pngBytes!, message, '$fileBase.png');
+                if (!ok && mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(languageProvider.isEnglish
+                          ? 'Sharing not supported here. Use PDF file.'
+                          : 'یہاں شیئرنگ دستیاب نہیں۔ پی ڈی ایف استعمال کریں۔'),
+                    ),
+                  );
+                }
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // PDF — Mughal Group branded (matches FilledLedgerReportPage)
+  // ═══════════════════════════════════════════════════════════════════
+  Future<pw.Document?> _buildItemsWisePdf(
+      ItemsWiseLedgerProvider provider,
+      LanguageProvider languageProvider,
+      ) async {
+    try {
+      await PdfBranding.ensureAssets();
+
+      final pdf = pw.Document();
+      final openingBalanceDisplay = provider.displayOpeningBalance;
+      final DateTime? openingBalanceDate = provider.displayOpeningBalanceDate;
+      final transactions = provider.transactions ?? [];
+
+      final double totalDebit =
+          provider.report['debit']?.toDouble() ?? 0.0;
+      final double totalCredit =
+          openingBalanceDisplay + (provider.report['credit']?.toDouble() ?? 0.0);
+      final double finalBalance =
+          provider.report['balance']?.toDouble() ?? 0.0;
+      final double displayFinalBalance =
+      provider.isFiltered && provider.transactions.isEmpty
+          ? 0.0
+          : finalBalance;
+
+      // ──────────────── Urdu-safe text images ────────────────
+      final Map<String, pw.MemoryImage> customerImgs = {};
+      final Map<String, pw.MemoryImage> itemNameImgs = {};
+      final Map<String, pw.MemoryImage> bankNameImgs = {};
+      final jobs = <Future<void>>[];
+
+      void queue(Map<String, pw.MemoryImage> target, String text,
+          double fs, double w, double h) {
+        if (!PdfBranding.needsImage(text) || target.containsKey(text)) return;
+        jobs.add(PdfBranding.textImage(text,
+            fontSize: fs, width: w, height: h)
+            .then((img) => target[text] = img));
+      }
+
+      // Customer fields
+      queue(customerImgs, widget.customerName.trim(), 42, 165 * 3, 66);
+      queue(customerImgs, widget.customerAddress.trim(), 12, 165 * 3, 20);
+      queue(customerImgs, widget.customerCity.trim(), 12, 165 * 3, 20);
+
+      // Item + bank names
+      for (final t in transactions) {
+        final itemName = t['itemName']?.toString() ??
+            t['details']?.toString() ??
+            '';
+        if (itemName.isNotEmpty) queue(itemNameImgs, itemName, 42, 228, 66);
+        final bName = _getBankName(t) ?? '';
+        if (bName.isNotEmpty) queue(bankNameImgs, bName, 42, 165 * 3, 66);
+      }
+
+      await Future.wait(jobs);
+
+      // ──────────────── Section: CUSTOMER DETAILS ────────────────
+      pw.Widget customerSection() {
+        final nameImg = customerImgs[widget.customerName.trim()];
+        final addrImg = customerImgs[widget.customerAddress.trim()];
+        final cityImg = customerImgs[widget.customerCity.trim()];
+
+        return pw.Column(children: [
+          PdfBranding.sectionHeader('CUSTOMER DETAILS'),
+          PdfBranding.sectionBody(pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Expanded(
+                    child: pw.Column(children: [
+                      PdfBranding.field('Customer Name',
+                          img: nameImg, text: widget.customerName),
+                      PdfBranding.field('Phone Number',
+                          text: widget.customerPhone.isEmpty
+                              ? '-'
+                              : widget.customerPhone),
+                    ])),
+                pw.SizedBox(width: 18),
+                pw.Expanded(
+                    child: pw.Column(children: [
+                      PdfBranding.field('Address',
+                          img: addrImg,
+                          text: widget.customerAddress.isEmpty
+                              ? '-'
+                              : widget.customerAddress),
+                      PdfBranding.field('City',
+                          img: cityImg,
+                          text: widget.customerCity.isEmpty
+                              ? '-'
+                              : widget.customerCity),
+                    ])),
+              ])),
+        ]);
+      }
+
+      // ──────────────── Branded transaction table ────────────────
+      pw.Widget transactionSection() {
+        final headers = [
+          'Date',
+          'Invoice No',
+          'Item Name',
+          'Type',
+          'Qty',
+          'Unit Price',
+          'Payment',
+          'Bank',
+          'Debit',
+          'Credit',
+          'Balance',
+        ];
+
+        final sorted = List<Map<String, dynamic>>.from(transactions);
+        sorted.sort((a, b) {
+          final da = DateTime.tryParse(a['date']?.toString() ?? '') ??
+              DateTime(2000);
+          final db = DateTime.tryParse(b['date']?.toString() ?? '') ??
+              DateTime(2000);
+          return da.compareTo(db);
+        });
+
+        final rows = <pw.TableRow>[];
+
+        bool openingAdded = false;
+        if ((openingBalanceDisplay != 0 || !provider.isFiltered) &&
+            openingBalanceDate != null) {
+          if (sorted.isEmpty ||
+              openingBalanceDate.isBefore(
+                  DateTime.tryParse(sorted.first['date']?.toString() ?? '') ??
+                      DateTime(2000))) {
+            rows.add(_openingBalanceTableRow(
+                provider, languageProvider, openingBalanceDisplay));
+            openingAdded = true;
+          }
+        }
+
+        for (final t in sorted) {
+          final date = DateTime.tryParse(t['date']?.toString() ?? '') ??
+              DateTime(2000);
+
+          if (!openingAdded &&
+              openingBalanceDate != null &&
+              openingBalanceDate.isBefore(date) &&
+              (openingBalanceDisplay != 0 || !provider.isFiltered)) {
+            rows.add(_openingBalanceTableRow(
+                provider, languageProvider, openingBalanceDisplay));
+            openingAdded = true;
+          }
+
+          final isItem = t['isItem'] == true;
+          final invoiceNumber = t['invoiceNumber']?.toString() ?? '-';
+          final itemName = t['itemName']?.toString() ??
+              t['details']?.toString() ??
+              '-';
+
+          final type = isItem
+              ? (languageProvider.isEnglish ? 'Item' : 'آئٹم')
+              : (languageProvider.isEnglish ? 'Payment' : 'ادائیگی');
+
+          final quantity = isItem
+              ? (t['quantity'] ?? 0).toStringAsFixed(2)
+              : '-';
+          final unitPrice = isItem
+              ? (t['unitPrice'] ?? 0).toStringAsFixed(2)
+              : '-';
+          final paymentMethod = _getPaymentMethodText(
+              t['paymentMethod']?.toString() ?? '-', languageProvider);
+          final bankName = _getBankName(t) ?? '-';
+          final debit = (t['debit'] ?? 0).toDouble();
+          final credit = (t['credit'] ?? 0).toDouble();
+          final balance = (t['balance'] ?? 0).toDouble();
+
+          rows.add(pw.TableRow(
+            decoration: pw.BoxDecoration(
+                color: rows.length.isEven
+                    ? PdfColors.white
+                    : PdfBranding.softBg),
+            children: [
+              PdfBranding.cell(DateFormat('dd MMM yyyy').format(date)),
+              PdfBranding.cell(invoiceNumber, bold: true),
+              PdfBranding.imgCell(itemNameImgs[itemName], itemName, h: 18),
+              PdfBranding.cell(type),
+              PdfBranding.cell(quantity),
+              PdfBranding.cell(
+                  isItem ? 'Rs $unitPrice' : '-'),
+              PdfBranding.cell(paymentMethod),
+              PdfBranding.imgCell(bankNameImgs[bankName], bankName, h: 18),
+              PdfBranding.cell(
+                  debit > 0 ? 'Rs ${debit.toStringAsFixed(2)}' : '-'),
+              PdfBranding.cell(
+                  credit > 0 ? 'Rs ${credit.toStringAsFixed(2)}' : '-'),
+              PdfBranding.cell('Rs ${balance.toStringAsFixed(2)}',
+                  bold: true),
+            ],
+          ));
+        }
+
+        if (!openingAdded &&
+            (openingBalanceDisplay != 0 || !provider.isFiltered) &&
+            openingBalanceDate != null) {
+          rows.add(_openingBalanceTableRow(
+              provider, languageProvider, openingBalanceDisplay));
+        }
+
+        rows.add(pw.TableRow(
+          decoration: pw.BoxDecoration(color: PdfBranding.orange),
+          children: [
+            PdfBranding.headCell('TOTALS'),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(''),
+            PdfBranding.headCell(
+                'Rs ${totalDebit.toStringAsFixed(2)}'),
+            PdfBranding.headCell(
+                'Rs ${totalCredit.toStringAsFixed(2)}'),
+            PdfBranding.headCell(
+                'Rs ${displayFinalBalance.toStringAsFixed(2)}'),
+          ],
+        ));
+
+        return pw.Column(children: [
+          PdfBranding.sectionHeader('ITEMS WISE TRANSACTION DETAILS'),
+          pw.Table(
+            border: pw.TableBorder(
+              left: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+              right: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+              bottom: pw.BorderSide(color: PdfBranding.navy, width: 0.8),
+              horizontalInside:
+              pw.BorderSide(color: PdfBranding.softLine, width: 0.4),
+              verticalInside:
+              pw.BorderSide(color: PdfBranding.softLine, width: 0.4),
+            ),
+            defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
+            columnWidths: const {
+              0: pw.FlexColumnWidth(1.2), // Date
+              1: pw.FlexColumnWidth(1.0), // Invoice No
+              2: pw.FlexColumnWidth(2.0), // Item Name
+              3: pw.FlexColumnWidth(0.9), // Type
+              4: pw.FlexColumnWidth(0.7), // Qty
+              5: pw.FlexColumnWidth(1.0), // Unit Price
+              6: pw.FlexColumnWidth(1.2), // Payment
+              7: pw.FlexColumnWidth(1.2), // Bank
+              8: pw.FlexColumnWidth(1.1), // Debit
+              9: pw.FlexColumnWidth(1.1), // Credit
+              10: pw.FlexColumnWidth(1.2), // Balance
+            },
+            children: [
+              pw.TableRow(
+                decoration: pw.BoxDecoration(color: PdfBranding.navy),
+                children: headers.map(PdfBranding.headCell).toList(),
+              ),
+              ...rows,
+            ],
+          ),
+        ]);
+      }
+
+      // ──────────────── Summary boxes ────────────────
+      pw.Widget summaryBox() => PdfBranding.framed(pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            PdfBranding.boxTitle('STATEMENT SUMMARY'),
+            pw.SizedBox(height: 6),
+            pw.Expanded(
+              child: pw.Container(
+                width: double.infinity,
+                padding: const pw.EdgeInsets.symmetric(horizontal: 8),
+                color: PdfBranding.softBg,
+                child: pw.Column(
+                    mainAxisAlignment: pw.MainAxisAlignment.center,
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      PdfBranding.sumRow(
+                          'Total Debit',
+                          'Rs ${totalDebit.toStringAsFixed(2)}',
+                          bold: true),
+                      PdfBranding.sumRow(
+                          'Total Credit',
+                          'Rs ${totalCredit.toStringAsFixed(2)}',
+                          bold: true),
+                      PdfBranding.sumRow(
+                          'Closing Balance',
+                          'Rs ${displayFinalBalance.toStringAsFixed(2)}',
+                          big: true,
+                          color: PdfBranding.orange),
+                    ]),
+              ),
+            ),
+          ]));
+
+      pw.Widget accountBox() => PdfBranding.framed(pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            PdfBranding.boxTitle('CUSTOMER ACCOUNT'),
+            pw.SizedBox(height: 6),
+            PdfBranding.acctRow('Opening Balance',
+                'Rs ${openingBalanceDisplay.toStringAsFixed(2)}'),
+            PdfBranding.acctRow('Total Debit',
+                'Rs ${totalDebit.toStringAsFixed(2)}'),
+            PdfBranding.acctRow('Total Credit',
+                'Rs ${totalCredit.toStringAsFixed(2)}'),
+            pw.Spacer(),
+            pw.Container(
+              padding:
+              const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: pw.BoxDecoration(
+                  color: PdfBranding.orange,
+                  borderRadius: pw.BorderRadius.circular(4)),
+              child: pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    PdfBranding.txt('Closing Balance',
+                        size: 10, bold: true, color: PdfColors.white),
+                    PdfBranding.txt(
+                        'Rs ${displayFinalBalance.toStringAsFixed(2)}',
+                        size: 11, bold: true, color: PdfColors.white),
+                  ]),
+            ),
+          ]));
+
+      // ──────────────── Compose page ────────────────
+      final String dateText =
+      DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now());
+      final String periodText =
+      provider.isFiltered && provider.dateRangeFilter != null
+          ? '${DateFormat('dd MMM yy').format(provider.dateRangeFilter!.start)}'
+          ' – '
+          '${DateFormat('dd MMM yy').format(provider.dateRangeFilter!.end)}'
+          : 'All Transactions';
+
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4,
+          margin: pw.EdgeInsets.zero,
+          header: (ctx) => ctx.pageNumber == 1
+              ? PdfBranding.header()
+              : pw.SizedBox(height: 18),
+          footer: (ctx) => PdfBranding.footer(),
+          build: (ctx) => [
+            PdfBranding.pad(
+                PdfBranding.titleBanner('ITEMS WISE STATEMENT'), v: 10),
+            PdfBranding.pad(pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  PdfBranding.infoBox('Date Range', periodText),
+                  PdfBranding.infoBox('Generated', dateText),
+                ])),
+            pw.SizedBox(height: 10),
+            PdfBranding.pad(customerSection()),
+            pw.SizedBox(height: 12),
+            PdfBranding.pad(transactionSection()),
+            pw.SizedBox(height: 4),
+            PdfBranding.pad(PdfBranding.txt(
+                'Weight and Amount are calculated automatically.',
+                size: 7.5,
+                color: PdfBranding.grey)),
+            pw.SizedBox(height: 8),
+            PdfBranding.pad(pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Expanded(child: summaryBox()),
+                  pw.SizedBox(width: 12),
+                  pw.Expanded(child: accountBox()),
+                ])),
+          ],
+        ),
+      );
+
+      return pdf;
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error generating PDF: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return null;
+    }
+  }
+
+  pw.TableRow _openingBalanceTableRow(
+      ItemsWiseLedgerProvider provider,
+      LanguageProvider languageProvider,
+      double openingBalanceDisplay,
+      ) {
+    final dateStr = provider.displayOpeningBalanceDate != null
+        ? DateFormat('dd MMM yyyy')
+        .format(provider.displayOpeningBalanceDate!)
+        : '-';
+    final label = languageProvider.isEnglish
+        ? provider.openingBalanceLabel
+        : (provider.isFiltered ? 'پچھلا بیلنس' : 'ابتدائی بیلنس');
+
+    return pw.TableRow(
+      decoration: pw.BoxDecoration(color: PdfBranding.softBg),
+      children: [
+        PdfBranding.cell(dateStr),
+        PdfBranding.cell('-'),
+        PdfBranding.cell(label, bold: true),
+        PdfBranding.cell('-'),
+        PdfBranding.cell('-'),
+        PdfBranding.cell('-'),
+        PdfBranding.cell('-'),
+        PdfBranding.cell('-'),
+        PdfBranding.cell('-'),
+        PdfBranding.cell(
+            'Rs ${openingBalanceDisplay.toStringAsFixed(2)}',
+            bold: true),
+        PdfBranding.cell(
+            'Rs ${openingBalanceDisplay.toStringAsFixed(2)}',
+            bold: true),
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Print / download
+  // ═══════════════════════════════════════════════════════════════════
+  Future<void> _generateAndPrintPDF(
+      ItemsWiseLedgerProvider provider,
+      LanguageProvider languageProvider) async {
+    final pdf = await _buildItemsWisePdf(provider, languageProvider);
+    if (pdf == null) return;
+    await _printPDF(pdf);
+  }
+
+  Future<void> _printPDF(pw.Document pdf) async {
+    try {
+      if (kIsWeb) {
+        final bytes = await pdf.save();
+        final blob = html.Blob([bytes], 'application/pdf');
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        final anchor =
+        html.document.createElement('a') as html.AnchorElement
+          ..href = url
+          ..style.display = 'none'
+          ..download =
+              'items_wise_ledger_${widget.customerName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf';
+        html.document.body?.children.add(anchor);
+        anchor.click();
+        html.document.body?.children.remove(anchor);
+        html.Url.revokeObjectUrl(url);
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('PDF downloaded successfully!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        await Printing.layoutPdf(
+          onLayout: (PdfPageFormat format) async => pdf.save(),
+          name:
+          'items_wise_ledger_${widget.customerName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf',
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error printing PDF: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // In-page UI (unchanged layout — just adds the WhatsApp button)
+  // ═══════════════════════════════════════════════════════════════════
 
   @override
   Widget build(BuildContext context) {
@@ -135,10 +803,26 @@ class _ItemsWiseLedgerReportPageState
           actions: [
             Consumer<ItemsWiseLedgerProvider>(
               builder: (context, provider, child) {
-                return IconButton(
-                  icon: const Icon(Icons.print),
-                  onPressed: () =>
-                      _generateAndPrintPDF(provider, languageProvider),
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.print),
+                      tooltip: languageProvider.isEnglish
+                          ? 'Print / Download PDF'
+                          : 'پرنٹ / پی ڈی ایف',
+                      onPressed: () =>
+                          _generateAndPrintPDF(provider, languageProvider),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.share, color: Colors.white),
+                      tooltip: languageProvider.isEnglish
+                          ? 'Share on WhatsApp'
+                          : 'واٹس ایپ پر بھیجیں',
+                      onPressed: () =>
+                          _sharePDFOnWhatsApp(provider, languageProvider),
+                    ),
+                  ],
                 );
               },
             ),
@@ -210,558 +894,7 @@ class _ItemsWiseLedgerReportPageState
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // PDF GENERATION
-  // ─────────────────────────────────────────────────────────────
-
-  Future<void> _generateAndPrintPDF(
-      ItemsWiseLedgerProvider provider,
-      LanguageProvider languageProvider) async {
-    try {
-      final pdf = pw.Document();
-      final openingBalance = provider.displayOpeningBalance;
-      final transactions = provider.transactions ?? [];
-
-      final ByteData bytes =
-      await rootBundle.load('assets/images/logo.png');
-      final image = pw.MemoryImage(bytes.buffer.asUint8List());
-
-      double totalDebit = 0;
-      double totalCredit = 0;
-      double finalBalance = openingBalance;
-
-      if (openingBalance > 0) {
-        totalCredit += openingBalance;
-      } else if (openingBalance < 0) {
-        totalDebit += openingBalance.abs();
-      }
-
-      for (var transaction in transactions) {
-        final debit = (transaction['debit'] ?? 0).toDouble();
-        final credit = (transaction['credit'] ?? 0).toDouble();
-        totalDebit += debit;
-        totalCredit += credit;
-        finalBalance += credit;
-        finalBalance -= debit;
-      }
-
-      // ✅ Build async table BEFORE pdf.addPage
-      final itemsTableWidget =
-      await _buildPDFItemsWiseTable(provider, languageProvider);
-
-      pdf.addPage(
-        pw.MultiPage(
-          pageFormat: PdfPageFormat.a4,
-          margin:
-          const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 20),
-          build: (pw.Context context) {
-            return [
-              pw.Header(
-                level: 0,
-                child: pw.Row(
-                  children: [
-                    pw.Image(image, width: 200, height: 150),
-                    pw.Spacer(),
-                    pw.Text(
-                      'Items Wise Statement',
-                      style: pw.TextStyle(
-                          fontSize: 20, fontWeight: pw.FontWeight.bold),
-                    ),
-                  ],
-                ),
-              ),
-              pw.SizedBox(height: 8),
-              pw.Row(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Expanded(
-                    child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        pw.Text('Customer: ${widget.customerName}',
-                            style: pw.TextStyle(
-                                fontWeight: pw.FontWeight.bold)),
-                        pw.Text('Phone: ${widget.customerPhone}'),
-                        pw.Text('Address: ${widget.customerAddress}'),
-                        pw.Text('City: ${widget.customerCity}'),
-                      ],
-                    ),
-                  ),
-                  pw.Expanded(
-                    child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.end,
-                      children: [
-                        pw.Text(
-                            'Date Range: ${provider.isFiltered && provider.dateRangeFilter != null ? '${DateFormat('dd MMM yy').format(provider.dateRangeFilter!.start)} - ${DateFormat('dd MMM yy').format(provider.dateRangeFilter!.end)}' : 'All Transactions'}'),
-                        pw.Text(
-                            'Generated: ${DateFormat('dd MMM yyyy hh:mm a').format(DateTime.now())}'),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              pw.Header(
-                level: 1,
-                child: pw.Text('Items Wise Transaction Details'),
-              ),
-              // ✅ Use pre-built widget — no await needed here
-              itemsTableWidget,
-            ];
-          },
-        ),
-      );
-
-      await _printPDF(pdf);
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error generating PDF: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
-  }
-
-  // ✅ Now async — pre-renders item names & bank names as high-res images
-  Future<pw.Widget> _buildPDFItemsWiseTable(
-      ItemsWiseLedgerProvider provider,
-      LanguageProvider languageProvider,
-      ) async {
-    final openingBalanceDisplay = provider.displayOpeningBalance;
-    final transactions = provider.transactions ?? [];
-
-    double totalDebit = provider.report['debit']?.toDouble() ?? 0.0;
-    double totalCredit =
-        openingBalanceDisplay + (provider.report['credit']?.toDouble() ?? 0.0);
-    double finalBalance = provider.report['balance']?.toDouble() ?? 0.0;
-
-    final displayFinalBalance =
-    provider.isFiltered && provider.transactions.isEmpty
-        ? 0.0
-        : finalBalance;
-
-    // ── Pre-render item names and bank names as high-resolution images ──
-    final Map<String, Uint8List> itemNameImages = {};
-    final Map<String, Uint8List> bankNameImages = {};
-
-    for (var transaction in transactions) {
-      final itemName = transaction['itemName']?.toString() ??
-          transaction['details']?.toString() ??
-          '-';
-      if (!itemNameImages.containsKey(itemName)) {
-        itemNameImages[itemName] = await _renderTextAsImageForPdf(
-          itemName,
-          fontSize: 9,
-          width: 150,
-          height: 22,
-        );
-      }
-
-      final bName = _getBankName(transaction) ?? '-';
-      if (!bankNameImages.containsKey(bName)) {
-        bankNameImages[bName] = await _renderTextAsImageForPdf(
-          bName,
-          fontSize: 9,
-          width: 80,
-          height: 22,
-        );
-      }
-    }
-
-    List<pw.Widget> rows = [];
-
-    // ── Table header (matches customer ledger style) ──
-    rows.add(
-      pw.Container(
-        decoration: pw.BoxDecoration(color: PdfColors.grey200),
-        child: pw.Row(
-          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-          children: [
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Date' : 'ڈیٹ', 55),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Invoice No.' : 'انوائس نمبر',
-                45),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Item Name' : 'آئٹم کا نام',
-                90),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Type' : 'قسم', 40),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Qty' : 'مقدار', 28),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Unit Price' : 'یونٹ قیمت',
-                45),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish
-                    ? 'Payment Method'
-                    : 'ادائیگی کا طریقہ',
-                55),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Bank' : 'بینک', 55),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Debit' : 'ڈیبٹ', 45),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Credit' : 'کریڈٹ', 45),
-            _buildPdfHeaderCell(
-                languageProvider.isEnglish ? 'Balance' : 'بیلنس', 55),
-          ],
-        ),
-      ),
-    );
-
-    // ── Sort transactions ──
-    List<Map<String, dynamic>> sortedTransactions =
-    List.from(transactions);
-    sortedTransactions.sort((a, b) {
-      final dateA =
-          DateTime.tryParse(a['date']?.toString() ?? '') ?? DateTime(2000);
-      final dateB =
-          DateTime.tryParse(b['date']?.toString() ?? '') ?? DateTime(2000);
-      return dateA.compareTo(dateB);
-    });
-
-    bool openingBalanceAdded = false;
-    DateTime? openingBalanceDate = provider.displayOpeningBalanceDate;
-
-    // ── Opening balance at chronological position ──
-    if ((openingBalanceDisplay != 0 || !provider.isFiltered) &&
-        openingBalanceDate != null) {
-      if (sortedTransactions.isEmpty ||
-          openingBalanceDate.isBefore(
-              DateTime.tryParse(
-                  sortedTransactions.first['date']?.toString() ?? '') ??
-                  DateTime(2000))) {
-        rows.add(_buildOpeningBalancePdfRow(
-            provider, languageProvider, openingBalanceDisplay));
-        openingBalanceAdded = true;
-      }
-    }
-
-    // ── Transaction rows ──
-    for (var transaction in sortedTransactions) {
-      final date =
-          DateTime.tryParse(transaction['date']?.toString() ?? '') ??
-              DateTime(2000);
-
-      if (!openingBalanceAdded &&
-          openingBalanceDate != null &&
-          openingBalanceDate.isBefore(date) &&
-          (openingBalanceDisplay != 0 || !provider.isFiltered)) {
-        rows.add(_buildOpeningBalancePdfRow(
-            provider, languageProvider, openingBalanceDisplay));
-        openingBalanceAdded = true;
-      }
-
-      final isItem = transaction['isItem'] == true;
-      final invoiceNumber =
-          transaction['invoiceNumber']?.toString() ?? '-';
-      final itemName = transaction['itemName']?.toString() ??
-          transaction['details']?.toString() ??
-          '-';
-
-      final type = isItem
-          ? (languageProvider.isEnglish ? 'Item' : 'آئٹم')
-          : (languageProvider.isEnglish ? 'Payment' : 'ادائیگی');
-
-      final quantity =
-      isItem ? (transaction['quantity'] ?? 0).toStringAsFixed(2) : '-';
-      final unitPrice =
-      isItem ? (transaction['unitPrice'] ?? 0).toStringAsFixed(2) : '-';
-      final paymentMethod =
-          transaction['paymentMethod']?.toString() ?? '-';
-      final paymentMethodText =
-      _getPaymentMethodText(paymentMethod, languageProvider);
-      final bankNameStr = _getBankName(transaction) ?? '-';
-      final debit = (transaction['debit'] ?? 0).toDouble();
-      final credit = (transaction['credit'] ?? 0).toDouble();
-      final balance = (transaction['balance'] ?? 0).toDouble();
-
-      // ── Item name cell: pre-rendered image for crisp output ──
-      final pw.Widget itemNameCell = itemNameImages.containsKey(itemName)
-          ? pw.Padding(
-        padding: const pw.EdgeInsets.all(2),
-        child: pw.Image(
-          pw.MemoryImage(itemNameImages[itemName]!),
-          width: 83,
-          height: 18,
-          fit: pw.BoxFit.contain,
-        ),
-      )
-          : _buildPdfDataCell(itemName, 90);
-
-      // ── Bank name cell: pre-rendered image ──
-      final pw.Widget bankCell = bankNameImages.containsKey(bankNameStr)
-          ? pw.Padding(
-        padding: const pw.EdgeInsets.all(2),
-        child: pw.Image(
-          pw.MemoryImage(bankNameImages[bankNameStr]!),
-          width: 48,
-          height: 18,
-          fit: pw.BoxFit.contain,
-        ),
-      )
-          : _buildPdfDataCell(bankNameStr, 55);
-
-      rows.add(
-        pw.Container(
-          padding: const pw.EdgeInsets.all(6),
-          decoration: const pw.BoxDecoration(
-            border: pw.Border(
-              bottom: pw.BorderSide(color: PdfColors.grey300, width: 0.5),
-            ),
-          ),
-          child: pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              _buildPdfDataCell(
-                  DateFormat('dd MMM yyyy').format(date), 55),
-              _buildPdfDataCell(
-                invoiceNumber,
-                45,
-                textColor: PdfColors.blue800,
-                fontWeight: pw.FontWeight.bold,
-              ),
-              pw.SizedBox(width: 90, child: itemNameCell),
-              _buildPdfDataCell(type, 40),
-              _buildPdfDataCell(quantity, 28),
-              _buildPdfDataCell(
-                isItem ? 'Rs $unitPrice' : '-',
-                45,
-                textAlign: pw.TextAlign.right,
-              ),
-              _buildPdfDataCell(paymentMethodText, 55),
-              pw.SizedBox(width: 55, child: bankCell),
-              _buildPdfDataCell(
-                debit > 0 ? 'Rs ${debit.toStringAsFixed(2)}' : '-',
-                45,
-                textColor:
-                debit > 0 ? PdfColors.red : PdfColors.black,
-                textAlign: pw.TextAlign.right,
-              ),
-              _buildPdfDataCell(
-                credit > 0 ? 'Rs ${credit.toStringAsFixed(2)}' : '-',
-                45,
-                textColor:
-                credit > 0 ? PdfColors.green800 : PdfColors.black,
-                textAlign: pw.TextAlign.right,
-              ),
-              _buildPdfDataCell(
-                'Rs ${balance.toStringAsFixed(2)}',
-                55,
-                fontWeight: pw.FontWeight.bold,
-                textColor: PdfColors.blue800,
-                textAlign: pw.TextAlign.right,
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // ── Opening balance at end if not yet inserted ──
-    if (!openingBalanceAdded &&
-        (openingBalanceDisplay != 0 || !provider.isFiltered) &&
-        openingBalanceDate != null) {
-      rows.add(_buildOpeningBalancePdfRow(
-          provider, languageProvider, openingBalanceDisplay));
-    }
-
-    // ── Totals row ──
-    rows.add(
-      pw.Container(
-        padding: const pw.EdgeInsets.all(6),
-        decoration: const pw.BoxDecoration(
-          border: pw.Border(
-            top: pw.BorderSide(color: PdfColors.blue, width: 1.5),
-          ),
-        ),
-        child: pw.Row(
-          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-          children: [
-            _buildPdfDataCell(
-              languageProvider.isEnglish ? 'TOTALS' : 'کل',
-              55,
-              fontWeight: pw.FontWeight.bold,
-            ),
-            _buildPdfDataCell('', 45),
-            _buildPdfDataCell('', 90),
-            _buildPdfDataCell('', 40),
-            _buildPdfDataCell('', 28),
-            _buildPdfDataCell('', 45),
-            _buildPdfDataCell('', 55),
-            _buildPdfDataCell('', 55),
-            _buildPdfDataCell(
-              'Rs ${totalDebit.toStringAsFixed(2)}',
-              45,
-              fontWeight: pw.FontWeight.bold,
-              textColor: PdfColors.red,
-              textAlign: pw.TextAlign.right,
-            ),
-            _buildPdfDataCell(
-              'Rs ${totalCredit.toStringAsFixed(2)}',
-              45,
-              fontWeight: pw.FontWeight.bold,
-              textColor: PdfColors.green800,
-              textAlign: pw.TextAlign.right,
-            ),
-            _buildPdfDataCell(
-              'Rs ${displayFinalBalance.toStringAsFixed(2)}',
-              55,
-              fontWeight: pw.FontWeight.bold,
-              textColor:
-              displayFinalBalance > 0 ? PdfColors.green : PdfColors.red,
-              textAlign: pw.TextAlign.right,
-            ),
-          ],
-        ),
-      ),
-    );
-
-    return pw.Column(children: rows);
-  }
-
-  pw.Widget _buildOpeningBalancePdfRow(
-      ItemsWiseLedgerProvider provider,
-      LanguageProvider languageProvider,
-      double openingBalanceDisplay,
-      ) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.all(6),
-      decoration: pw.BoxDecoration(color: PdfColors.grey100),
-      child: pw.Row(
-        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-        children: [
-          _buildPdfDataCell(
-            provider.displayOpeningBalanceDate != null
-                ? DateFormat('dd MMM yyyy')
-                .format(provider.displayOpeningBalanceDate!)
-                : '-',
-            55,
-          ),
-          _buildPdfDataCell('-', 45), // Invoice No
-          _buildPdfDataCell(
-            languageProvider.isEnglish
-                ? provider.openingBalanceLabel
-                : (provider.isFiltered ? 'پچھلا بیلنس' : 'ابتدائی بیلنس'),
-            90,
-          ),
-          _buildPdfDataCell('-', 40), // Type
-          _buildPdfDataCell('-', 28), // Qty
-          _buildPdfDataCell('-', 45), // Unit Price
-          _buildPdfDataCell('-', 55), // Payment Method
-          _buildPdfDataCell('-', 55), // Bank
-          _buildPdfDataCell('-', 45), // Debit
-          _buildPdfDataCell(
-            'Rs ${openingBalanceDisplay.toStringAsFixed(2)}',
-            45,
-            textColor:
-            openingBalanceDisplay > 0 ? PdfColors.green : PdfColors.red,
-            fontWeight: pw.FontWeight.bold,
-            textAlign: pw.TextAlign.right,
-          ),
-          _buildPdfDataCell(
-            'Rs ${openingBalanceDisplay.toStringAsFixed(2)}',
-            55,
-            textColor:
-            openingBalanceDisplay > 0 ? PdfColors.green : PdfColors.red,
-            fontWeight: pw.FontWeight.bold,
-            textAlign: pw.TextAlign.right,
-          ),
-        ],
-      ),
-    );
-  }
-
-  pw.Widget _buildPdfHeaderCell(String text, double width) {
-    return pw.Container(
-      width: width,
-      padding: const pw.EdgeInsets.all(6),
-      decoration: const pw.BoxDecoration(
-        border:
-        pw.Border(right: pw.BorderSide(color: PdfColors.grey300)),
-      ),
-      child: pw.Text(
-        text,
-        style: pw.TextStyle(
-          fontWeight: pw.FontWeight.bold,
-          color: PdfColors.blue800,
-          fontSize: 9,
-        ),
-        textAlign: pw.TextAlign.center,
-      ),
-    );
-  }
-
-  pw.Widget _buildPdfDataCell(
-      String text,
-      double width, {
-        PdfColor? textColor,
-        pw.FontWeight? fontWeight,
-        pw.TextAlign textAlign = pw.TextAlign.center,
-      }) {
-    return pw.Container(
-      width: width,
-      padding: const pw.EdgeInsets.all(6),
-      decoration: const pw.BoxDecoration(
-        border:
-        pw.Border(right: pw.BorderSide(color: PdfColors.grey300)),
-      ),
-      child: pw.Text(
-        text,
-        style: pw.TextStyle(
-          fontSize: 8,
-          color: textColor ?? PdfColors.black,
-          fontWeight: fontWeight,
-        ),
-        textAlign: textAlign,
-        maxLines: 2,
-      ),
-    );
-  }
-
-  Future<void> _printPDF(pw.Document pdf) async {
-    try {
-      if (kIsWeb) {
-        final bytes = await pdf.save();
-        final blob = html.Blob([bytes], 'application/pdf');
-        final url = html.Url.createObjectUrlFromBlob(blob);
-        final anchor = html.document.createElement('a') as html.AnchorElement
-          ..href = url
-          ..style.display = 'none'
-          ..download =
-              'items_wise_ledger_${widget.customerName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf';
-        html.document.body?.children.add(anchor);
-        anchor.click();
-        html.document.body?.children.remove(anchor);
-        html.Url.revokeObjectUrl(url);
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('PDF downloaded successfully!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      } else {
-        await Printing.layoutPdf(
-          onLayout: (PdfPageFormat format) async => pdf.save(),
-          name:
-          'items_wise_ledger_${widget.customerName}_${DateFormat('ddMMyyyy').format(DateTime.now())}.pdf',
-        );
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error printing PDF: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // UI WIDGETS
-  // ─────────────────────────────────────────────────────────────
+  // ── In-page helpers unchanged ──────────────────────────────────────
 
   Widget _buildCustomerInfo(
       BuildContext context,
@@ -1027,7 +1160,6 @@ class _ItemsWiseLedgerReportPageState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // ── Table Header (matches customer ledger columns) ──
         Container(
           decoration: BoxDecoration(
             color: const Color(0xFF2196F3).withOpacity(0.2),
@@ -1072,8 +1204,6 @@ class _ItemsWiseLedgerReportPageState
             ],
           ),
         ),
-
-        // ── Rows ──
         ...(() {
           List<Widget> rows = [];
 
@@ -1141,7 +1271,7 @@ class _ItemsWiseLedgerReportPageState
             1,
             isMobile,
           ),
-          _buildExpandedDataCell('-', 1, isMobile),   // Invoice No
+          _buildExpandedDataCell('-', 1, isMobile), // Invoice No
           _buildExpandedDataCell(
             languageProvider.isEnglish
                 ? provider.openingBalanceLabel
@@ -1151,12 +1281,12 @@ class _ItemsWiseLedgerReportPageState
             2,
             isMobile,
           ),
-          _buildExpandedDataCell('-', 1, isMobile),   // Type
+          _buildExpandedDataCell('-', 1, isMobile), // Type
           _buildExpandedDataCell('-', 0.8, isMobile), // Qty
           _buildExpandedDataCell('-', 1.2, isMobile), // Unit Price
           _buildExpandedDataCell('-', 1.5, isMobile), // Payment Method
-          _buildExpandedDataCell('-', 2, isMobile),   // Bank
-          _buildExpandedDataCell('-', 1, isMobile),   // Debit
+          _buildExpandedDataCell('-', 2, isMobile), // Bank
+          _buildExpandedDataCell('-', 1, isMobile), // Debit
           _buildExpandedDataCell(
             'Rs ${displayBalance.toStringAsFixed(2)}',
             1,
@@ -1265,7 +1395,6 @@ class _ItemsWiseLedgerReportPageState
             1.5,
             isMobile,
           ),
-          // Bank cell with logo
           _buildExpandedDataCell(
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -1278,8 +1407,8 @@ class _ItemsWiseLedgerReportPageState
                 Flexible(
                   child: Text(
                     bankName ?? '-',
-                    style: TextStyle(
-                        fontSize: isMobile ? 10 : 12),
+                    style:
+                    TextStyle(fontSize: isMobile ? 10 : 12),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
